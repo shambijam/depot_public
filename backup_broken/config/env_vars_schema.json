@@ -1,0 +1,16 @@
+{
+    "required_env_vars": [
+        "MT5_LOGIN_LIVE",
+        "MT5_PASSWORD_LIVE",
+        "MT5_SERVER_LIVE",
+        "MT5_LOGIN_DEMO",
+        "MT5_PASSWORD_DEMO",
+        "MT5_SERVER_DEMO",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "BOT_MODE",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "MAGIC_NUMBER"
+    ]
+}

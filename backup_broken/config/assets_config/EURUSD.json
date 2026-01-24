@@ -1,0 +1,297 @@
+{
+  "description": "Configuration institutionnelle pour EURUSD - MODE SNIPER",
+  "symbol": "EURUSD",
+  "type": "forex",
+  "profile": "institutionnel",
+  "last_updated": "2026-01-06",
+  "volatility": {
+    "expected_daily_range_percent": {
+      "value": 0.8,
+      "adaptive_range": {
+        "min": 0.5,
+        "max": 1.2,
+        "adjustment_period_days": 30
+      }
+    },
+    "max_allowed_spread_points": {
+      "base": 10,
+      "session_multipliers": {
+        "asia": 1.2,
+        "london": 1.0,
+        "new_york": 1.1
+      },
+      "news_spike_tolerance": 3,
+      "volatility_adjustment": true
+    },
+    "min_tradable_range_points": {
+      "value": 15,
+      "dynamic_adjustment": true
+    }
+  },
+  "risk_management": {
+    "base_lot_size": 0.1,
+    "daily_loss_limit_percent": {
+      "value": 2.0
+    },
+    "weekly_loss_limit_percent": {
+      "value": 5.0
+    },
+    "performance_based_adjustments": {
+      "enabled": true
+    }
+  },
+  "symbol_info": {
+    "point": 0.00001,
+    "digits": 5,
+    "trade_contract_size": 100000,
+    "trade_tick_size": 0.00001
+  },
+  "strategy_toggles": {
+    "scalping": true,
+    "liquidity": false
+  },
+  "strategy_whitelist": [
+    "scalping"
+  ],
+  "overrides": {
+    "scalping": {
+      "burst_mode_overrides": {
+        "comment": "07 JAN 2026: Ajustements EURUSD pour les 4 modes de burst",
+        "niveau_2": {
+          "delta_momentum_min": 20.0,
+          "comment": "EURUSD standard, seuils par défaut OK"
+        },
+        "niveau_2_5": {
+          "delta_momentum_min": 18.0,
+          "require_at_least_one": {
+            "absorption_levels_min": 10.0,
+            "order_clustering_min": 6.0,
+            "tape_speed_ratio_min": 2.0
+          },
+          "comment": "EURUSD: Tape speed min 2.0 (activité normale)"
+        },
+        "niveau_3": {
+          "delta_momentum_min": 18.0,
+          "absorption_levels_min": 10.0,
+          "order_clustering_min": 3.5,
+          "composite_score_min": 68.0,
+          "comment": "EURUSD: Mode optimal recommandé pour tests"
+        },
+        "niveau_4": {
+          "institutional_filters": {
+            "market_fatigue": {
+              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "penalty_fatigued": 5.0,
+              "penalty_exhausted": 10.0
+            },
+            "price_memory": {
+              "min_score": 50.0
+            },
+            "market_physics": {
+              "require_aligned": true
+            }
+          },
+          "comment": "EURUSD: Filtres institutionnels standards"
+        }
+      },
+      "footprint": {
+        "m1_min_ticks": 50,
+        "m1_min_coverage_s": 5,
+        "burst_tolerance": {
+          "tickrate_min": 3.0,
+          "coverage_s_min_burst": 5
+        },
+        "comment": "06 JAN 2026 MODE SNIPER: m1_min_coverage_s=5s pour fenêtre 8s. EURUSD activité élevée"
+      },
+      "fusion": {
+        "ttl_ms": 600,
+        "max_slippage_points": 20,
+        "comment": "20 points = 2 pips pour EURUSD"
+      },
+      "orderflow_v6": {
+        "enabled": true,
+        "field_map": {
+          "delta_key": "delta",
+          "imbalance_key": "imbalance",
+          "vpoc_key": "vpoc",
+          "cvd_key": "cvd",
+          "cvd_slope_key": "cvd_slope",
+          "vwap_key": "vwap"
+        },
+        "lookback_bars": 6,
+        "cvd_slope_window": 5,
+        "comment_lookback": "06 JAN 2026 MODE SNIPER: lookback=6 (vs 8 avant) pour réactivité maximale",
+        "features": {
+          "delta": {
+            "abs_strong": 100.0,
+            "abs_extreme": 200.0,
+            "comment": "EURUSD a des deltas moyens (100 vs 15 pour USDJPY)"
+          },
+          "imbalance": {
+            "min": 0.58,
+            "extreme": 0.72,
+            "comment": "Seuils standards pour EURUSD"
+          },
+          "tickrate": {
+            "min": 3.0,
+            "burst_min": 5.0,
+            "coverage_s_min": 5,
+            "comment": "EURUSD : 3-5 ticks/sec (activité élevée)"
+          },
+          "vpoc": {
+            "drift_max_points": 15.0,
+            "comment": "15 points = 1.5 pips pour EURUSD"
+          },
+          "cvd": {
+            "slope_window": 10,
+            "slope_min": 0.0,
+            "comment": "06 JAN 2026 FIX: slope_window déprécié, utilisez cvd_slope_window au niveau orderflow_v6"
+          },
+          "vwap": {
+            "confirm_window": 10
+          }
+        },
+        "divergence": {
+          "enabled": true,
+          "lookback": 8,
+          "pivot_window": 1,
+          "confirm_window": 2,
+          "min_separation": 4,
+          "min_price_move_frac": 0.0001,
+          "min_indicator_move_frac": 0.0001,
+          "add_exhaustion": true,
+          "comment": "06 JAN 2026 MODE SNIPER: lookback=8, pivot=1, confirm=2 pour réactivité maximale"
+        },
+        "scoring": {
+          "weights": {
+            "delta": 0.35,
+            "imbalance": 0.30,
+            "tickrate": 0.20,
+            "divergence": 0.10,
+            "vpoc": 0.05
+          },
+          "entry_threshold": 0.60,
+          "comment_deprecated": "ATTENTION: Ces poids sont OBSOLÈTES (ancien système). Utilisez 'scoring_weights' ci-dessous (06 JAN 2026)"
+        },
+        "scoring_weights": {
+          "comment": "✅ POIDS OPTIMISÉS MODE SNIPER (06 JAN 2026)",
+          "comment_architecture": "Architecture: OrderFlow (50) + Footprint (30) + Triggers (20) = 100 pts max",
+          "delta_momentum_max": 32.0,
+          "volume_confirm_max": 12.0,
+          "imbalance_strength_max": 6.0,
+          "absorption_max": 18.0,
+          "clustering_max": 9.0,
+          "rejection_max": 3.0,
+          "triggers_max": 20.0,
+          "comment_total": "Total: 32+12+6 (OrderFlow=50) + 18+9+3 (Footprint=30) + 20 (Triggers) = 100 pts",
+          "comment_sniper": "MODE SNIPER: Delta critique (+4→32), absorption clé (+2→18). Volume/imbalance/clustering/rejection réduits pour réactivité ultra-rapide"
+        },
+        "sniper_mode": {
+          "enabled": true,
+          "max_trade_duration_seconds": 15,
+          "required_score_threshold": 85,
+          "delta_acceleration_min": 0.7,
+          "volume_spike_multiplier": 3.0,
+          "allow_partial_fills": false,
+          "max_spread_pips": 1.0,
+          "comment": "06 JAN 2026 NOUVEAU: Mode sniper trades <15s, score >85, delta accélération requise"
+        },
+        "ncp_strong": {
+          "delta_abs_min": 100.0,
+          "tickrate_min": 3.0,
+          "comment": "Seuils NCP standards pour EURUSD"
+        },
+        "momentum_filter": {
+          "enabled": true,
+          "lookback_bars": 3,
+          "min_price_change_points": 0.0,
+          "comment": "06 JAN 2026 MODE SNIPER V2: Filtre RÉGIME GLOBAL + momentum court - Rejette BUY si régime BEARISH+prix descend, rejette SELL si régime BULLISH+prix monte. Évite trades CONTRE le régime dominant!"
+        }
+      },
+      "entry_rules": {
+        "scalping": {
+          "burst_scalping": {
+            "use_orderflow_v6": true,
+            "min_score": 65.0,
+            "comment_min_score": "07 JAN 2026 TEST PARALLÈLE: EURUSD = NIVEAU 2 (Baseline permissif)",
+            "of_v6_gate": {
+              "min_score": 0.67,
+              "require_ncp_strong": true,
+              "min_delta_abs": 100.0,
+              "min_imbalance": 0.60,
+              "min_tickrate": 3.0,
+              "comment": "07 JAN 2026 NIVEAU 2: Seuils permissifs pour baseline (0.67 vs 0.70)"
+            },
+            "flow_vol_gate": {
+              "enabled": false
+            }
+          }
+        }
+      },
+      "sltp": {
+        "exit_mode": "sl_tp_then_trail",
+        "sl_method": "PIPS",
+        "tp_method": "PIPS",
+        "rr_base": 1.5,
+        "rr_floor": 1.0,
+        "rr_cap": 3.0,
+        "sl": {
+          "pips": 15.0,
+          "buffer_pips": 1,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "swing_lookback": 0,
+          "comment": "15 pips SL pour EURUSD (Option A - Conservateur)"
+        },
+        "tp": {
+          "pips": 23.0,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "execution": {
+            "min_sl_tp_distance_pips": 12
+          },
+          "comment": "23 pips TP pour EURUSD (RR 1.5, Option A - Conservateur)"
+        }
+      },
+      "closure_rules": {
+        "enabled": true,
+        "enable_profit_close": true,
+        "target_profit_pips": 1.6,
+        "require_full_count_for_profit_close": false,
+        "rt_fast_window_ms": 120000,
+        "rt_poll_interval_ms": 100,
+        "min_age_ms_for_any_close": 2000,
+        "enable_loss_guard": true,
+        "max_loss_pips": 20.0,
+        "loss_guard_arming_ms": 3000,
+        "comment": "06 JAN 2026: Sniper scalping <10s → Profit 2.5p, Loss 20p = ratio 1:8.0"
+      },
+      "timing_gatekeeper": {
+        "enabled": true,
+        "candle_timing_veto": {
+          "enabled": true,
+          "max_candle_age_seconds": 50,
+          "comment": "07 JAN 2026: VETO trades après 50s (EURUSD standard)"
+        },
+        "allowed_hours_gmt": [
+          7,
+          8,
+          9,
+          10,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18
+        ],
+        "comment_hours": "06 JAN 2026: Londres 7h-10h GMT + Overlap Londres/NY 13h-18h GMT",
+        "min_tick_rate": 2.0,
+        "min_coverage_s": 5.0,
+        "max_tick_rate": 200.0,
+        "max_spread_pips": 1.2,
+        "comment": "06 JAN 2026: min_coverage_s=5s pour fenêtre glissante 8s SCALPING SNIPER (analyse au scalpel). Spread max 1.2 pips EURUSD"
+      }
+    }
+  }
+}

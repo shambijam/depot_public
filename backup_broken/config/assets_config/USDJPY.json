@@ -1,0 +1,319 @@
+{
+  "description": "Configuration institutionnelle pour USDJPY - MODE SNIPER",
+  "symbol": "USDJPY",
+  "type": "forex",
+  "profile": "institutionnel",
+  "last_updated": "2026-01-06",
+  "symbol_info": {
+    "point": 0.001,
+    "digits": 3,
+    "pip_position": 2,
+    "pip_value": 0.01,
+    "trade_contract_size": 100000,
+    "trade_tick_size": 0.001,
+    "comment": "Pour USDJPY: 1 pip = 0.01 (2ème décimale), vs 0.0001 pour EURUSD"
+  },
+  "volatility": {
+    "expected_daily_range_percent": {
+      "value": 0.8,
+      "adaptive_range": {
+        "min": 0.5,
+        "max": 1.2,
+        "adjustment_period_days": 30
+      }
+    },
+    "max_allowed_spread_points": {
+      "base": 3,
+      "session_multipliers": {
+        "asia": 1.0,
+        "london": 1.2,
+        "new_york": 1.1
+      },
+      "news_spike_tolerance": 8,
+      "volatility_adjustment": true
+    },
+    "min_tradable_range_points": {
+      "value": 2,
+      "dynamic_adjustment": true
+    }
+  },
+  "risk_management": {
+    "base_lot_size": 0.1,
+    "daily_loss_limit_percent": {
+      "value": 2.0
+    },
+    "weekly_loss_limit_percent": {
+      "value": 5.0
+    },
+    "performance_based_adjustments": {
+      "enabled": true
+    }
+  },
+  "strategy_toggles": {
+    "scalping": true,
+    "liquidity": false
+  },
+  "strategy_whitelist": [
+    "scalping"
+  ],
+  "entry_rules": {
+    "scalping": {
+      "burst_scalping": {
+        "use_orderflow_v6": true,
+        "min_score": 65.0,
+        "comment_min_score": "16 JAN 2026: USDJPY score uniformisé à 65 (standard pour tous les actifs)",
+        "of_v6_gate": {
+          "min_score": 0.70,
+          "require_ncp_strong": true,
+          "min_delta_abs": 15.0,
+          "min_imbalance": 0.60,
+          "min_tickrate": 1.5,
+          "require_one_of": {
+            "absorption_min": 8.0,
+            "clustering_min": 5.0,
+            "tape_speed_ratio_min": 1.5
+          },
+          "comment": "07 JAN 2026 NIVEAU 2.5: Exige AU MOINS UN boost (absorption OU clustering OU tape speed)"
+        },
+        "flow_vol_gate": {
+          "enabled": false
+        },
+        "sltp": {
+          "exit_mode": "sl_tp_then_trail",
+          "sl_method": "PIPS",
+          "tp_method": "PIPS",
+          "rr_base": 1.5,
+          "rr_floor": 1.0,
+          "rr_cap": 3.0,
+          "sl": {
+            "pips": 12.0,
+            "buffer_pips": 2,
+            "atr_period": 14,
+            "atr_multiplier": 0.0,
+            "swing_lookback": 0,
+            "comment": "2.5 pips SL pour USDJPY (Option A - Conservateur, 06 JAN 2026)"
+          },
+          "tp": {
+            "pips": 12.0,
+            "atr_period": 14,
+            "atr_multiplier": 0.0,
+            "execution": {
+              "min_sl_tp_distance_pips": 5
+            },
+            "comment": "3.8 pips TP pour USDJPY (RR 1.5, Option A - Conservateur)"
+          }
+        }
+      }
+    }
+  },
+  "overrides": {
+    "scalping": {
+      "burst_mode_overrides": {
+        "comment": "07 JAN 2026: Ajustements USDJPY pour les 4 modes de burst (deltas faibles)",
+        "niveau_2": {
+          "delta_momentum_min": 15.0,
+          "volume_confirmation_min": 8.0,
+          "imbalance_strength_min": 5.0,
+          "composite_score_min": 62.0,
+          "comment": "USDJPY: Delta -5 pts, volume -2 pts, composite -3 pts (deltas 15 vs 100 EURUSD)"
+        },
+        "niveau_2_5": {
+          "delta_momentum_min": 12.0,
+          "volume_confirmation_min": 8.0,
+          "require_at_least_one": {
+            "absorption_levels_min": 8.0,
+            "order_clustering_min": 5.0,
+            "tape_speed_ratio_min": 1.5
+          },
+          "comment": "USDJPY: Seuils réduits (activité modérée, tape speed 1.5)"
+        },
+        "niveau_3": {
+          "delta_momentum_min": 12.0,
+          "absorption_levels_min": 8.0,
+          "order_clustering_min": 3.0,
+          "composite_score_min": 64.0,
+          "comment": "USDJPY: Seuils adaptés à faible delta (niveau 3 recommandé)"
+        },
+        "niveau_4": {
+          "composite_score_min": 66.0,
+          "institutional_filters": {
+            "market_fatigue": {
+              "allowed_states": [
+                "ENERGETIC",
+                "NORMAL"
+              ],
+              "penalty_fatigued": 4.0,
+              "penalty_exhausted": 8.0
+            },
+            "price_memory": {
+              "min_score": 48.0
+            },
+            "market_physics": {
+              "require_aligned": true
+            }
+          },
+          "comment": "USDJPY: Pénalités fatigue réduites (-1 pt), memory 48 (plus tolérant)"
+        }
+      },
+      "footprint": {
+        "m1_min_ticks": 30,
+        "m1_min_coverage_s": 5,
+        "burst_tolerance": {
+          "tickrate_min": 1.5,
+          "coverage_s_min_burst": 3
+        },
+        "comment": "06 JAN 2026 MODE SNIPER: USDJPY activité modérée (30 ticks vs 50 EURUSD, 60 GBPUSD)"
+      },
+      "fusion": {
+        "ttl_ms": 800,
+        "max_slippage_points": 50,
+        "comment": "50 points = 5 pips pour USDJPY (vs 0.5 pips)"
+      },
+      "orderflow_v6": {
+        "enabled": true,
+        "field_map": {
+          "delta_key": "delta",
+          "imbalance_key": "imbalance",
+          "vpoc_key": "vpoc",
+          "cvd_key": "cvd",
+          "cvd_slope_key": "cvd_slope",
+          "vwap_key": "vwap"
+        },
+        "lookback_bars": 8,
+        "cvd_slope_window": 7,
+        "comment_lookback": "06 JAN 2026 MODE SNIPER: lookback=8, cvd_slope=7 (plus long car USDJPY moins volatile, moins réactif)",
+        "features": {
+          "delta": {
+            "abs_strong": 15.0,
+            "abs_extreme": 30.0,
+            "comment": "USDJPY a des deltas beaucoup plus faibles que EURUSD (15 vs 100)"
+          },
+          "imbalance": {
+            "min": 0.55,
+            "extreme": 0.70,
+            "comment": "Seuils légèrement assouplis pour USDJPY"
+          },
+          "tickrate": {
+            "min": 1.5,
+            "burst_min": 3.0,
+            "coverage_s_min": 3,
+            "comment": "USDJPY : 1.5-3 ticks/sec (activité modérée)"
+          },
+          "vpoc": {
+            "drift_max_points": 10.0,
+            "comment": "10 points = 1 pip pour USDJPY (vs 15 points pour EURUSD)"
+          },
+          "cvd": {
+            "slope_window": 10,
+            "slope_min": 0.0,
+            "comment": "06 JAN 2026 FIX: slope_window déprécié, utilisez cvd_slope_window au niveau orderflow_v6"
+          },
+          "vwap": {
+            "confirm_window": 10
+          }
+        },
+        "divergence": {
+          "enabled": true,
+          "lookback": 12,
+          "pivot_window": 2,
+          "confirm_window": 3,
+          "min_separation": 4,
+          "min_price_move_frac": 0.0001,
+          "min_indicator_move_frac": 0.0001,
+          "add_exhaustion": true,
+          "comment": "06 JAN 2026 MODE SNIPER: lookback=12, pivot=2, confirm=3 (USDJPY moins réactif, peut utiliser fenêtres plus longues)"
+        },
+        "scoring": {
+          "weights": {
+            "delta": 0.35,
+            "imbalance": 0.30,
+            "tickrate": 0.20,
+            "divergence": 0.10,
+            "vpoc": 0.05
+          },
+          "entry_threshold": 0.60,
+          "comment_deprecated": "ATTENTION: Ces poids sont OBSOLÈTES (ancien système). Utilisez 'scoring_weights' ci-dessous (06 JAN 2026)"
+        },
+        "scoring_weights": {
+          "comment": "✅ POIDS OPTIMISÉS MODE SNIPER (06 JAN 2026)",
+          "comment_architecture": "Architecture: OrderFlow (50) + Footprint (30) + Triggers (20) = 100 pts max",
+          "delta_momentum_max": 22.0,
+          "volume_confirm_max": 16.0,
+          "imbalance_strength_max": 12.0,
+          "absorption_max": 14.0,
+          "clustering_max": 11.0,
+          "rejection_max": 5.0,
+          "triggers_max": 20.0,
+          "comment_total": "Total: 22+16+12 (OrderFlow=50) + 14+11+5 (Footprint=30) + 20 (Triggers) = 100 pts",
+          "comment_sniper": "MODE SNIPER USDJPY: Delta +2 vs avant (22 vs 20), absorption +2 (14 vs 12). Volume -2, clustering -2 pour réactivité"
+        },
+        "sniper_mode": {
+          "enabled": true,
+          "max_trade_duration_seconds": 15,
+          "required_score_threshold": 82,
+          "delta_acceleration_min": 0.6,
+          "volume_spike_multiplier": 3.5,
+          "allow_partial_fills": false,
+          "max_spread_pips": 1.5,
+          "comment": "06 JAN 2026 NOUVEAU: Mode sniper trades <15s, score >82 (vs 85 EURUSD car deltas plus faibles), delta accélération 0.6"
+        },
+        "ncp_strong": {
+          "delta_abs_min": 15.0,
+          "tickrate_min": 1.5,
+          "comment": "Seuils NCP ajustés pour USDJPY (delta faible, tickrate modéré)"
+        },
+        "momentum_filter": {
+          "enabled": true,
+          "lookback_bars": 3,
+          "min_price_change_pips": 3.0,
+          "comment": "08 JAN 2026: VETO SELL si prix monte >3 pips sur 3 bougies, VETO BUY si prix descend >3 pips (seuil plus bas car USDJPY moins volatile)"
+        }
+      },
+      "closure_rules": {
+        "enabled": true,
+        "enable_profit_close": true,
+        "target_profit_pips": 2.3,
+        "require_full_count_for_profit_close": false,
+        "rt_fast_window_ms": 120000,
+        "rt_poll_interval_ms": 100,
+        "min_age_ms_for_any_close": 2000,
+        "enable_loss_guard": true,
+        "max_loss_pips": 15.0,
+        "loss_guard_arming_ms": 3000,
+        "comment": "06 JAN 2026: Sniper scalping <10s → Profit 1.8p, Loss 15p = ratio 1:8.3"
+      },
+      "timing_gatekeeper": {
+        "enabled": true,
+        "candle_timing_veto": {
+          "enabled": true,
+          "max_candle_age_seconds": 52,
+          "comment": "07 JAN 2026: VETO trades après 52s (USDJPY plus permissif car moins volatile)"
+        },
+        "allowed_hours_gmt": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "comment_hours": "06 JAN 2026 MODE SNIPER: Tokyo 0h-3h GMT + Londres 7h-10h GMT + Overlap Londres/NY 13h-17h GMT",
+        "min_tick_rate": 0.5,
+        "min_coverage_s": 5.0,
+        "max_tick_rate": 200.0,
+        "max_spread_pips": 1.5,
+        "comment": "06 JAN 2026: min_coverage_s=5s pour fenêtre glissante 8s SCALPING SNIPER (analyse au scalpel). Spread max 1.5 pips USDJPY"
+      }
+    }
+  }
+}
