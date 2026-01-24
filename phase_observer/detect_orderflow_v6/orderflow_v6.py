@@ -9,7 +9,8 @@ from .data_preparator import validate_and_prepare_data
 from .volume_analyzer import calculate_volume_metrics
 from .pattern_detector import detect_patterns
 from .institutional_metrics import calculate_volume_profile
-from .scoring_engine import calculate_score_integrated
+# scoring_engine migre vers strategy/advanced_scoring.py (24 Jan 2026)
+from strategy.advanced_scoring import calculate_score_integrated
 from .result_builder import build_result
 from .divergence_detector import detect_divergences
 

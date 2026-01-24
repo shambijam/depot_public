@@ -6,9 +6,9 @@ import math
 import time
 import uuid
 from .base_strategy import BaseStrategy
+from .advanced_scoring import calculate_unified_score
 import numpy as np
 import pandas as pd
-
 
 
 # ================================================================
@@ -85,23 +85,57 @@ class USDJPYTimingOptimizer:
         import json
         from pathlib import Path
 
-        config_path = Path(__file__).parent.parent / "config" / "strategy" / "config_trade_scalping.json"
+        config_path = (
+            Path(__file__).parent.parent
+            / "config"
+            / "strategy"
+            / "config_trade_scalping.json"
+        )
 
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 full_config = json.load(f)
             return full_config.get("timing_optimizer_config", {})
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning(f"[TIMING_OPTIMIZER] Erreur config: {e}")
+
+            logging.getLogger(__name__).warning(
+                f"[TIMING_OPTIMIZER] Erreur config: {e}"
+            )
             # Fallback
             return {
-                "concentration": {"excellent": 0.50, "good": 0.35, "warning": 0.25, "veto": 0.20},
+                "concentration": {
+                    "excellent": 0.50,
+                    "good": 0.35,
+                    "warning": 0.25,
+                    "veto": 0.20,
+                },
                 "velocity": {"buy_dominant": 1.8, "sell_dominant": 0.6, "extreme": 3.0},
-                "multipliers": {"EXCELLENT": 1.20, "GOOD": 1.10, "FAIR": 1.00, "POOR": 0.80, "VETO": 0.50},
-                "veto_conditions": {"timing_score_threshold": 1.5, "concentration_threshold": 0.20, "velocity_ratio_extreme": 4.0, "poor_score_threshold": 1.0},
-                "bonuses_malus": {"concentration_strong_threshold": 0.50, "concentration_strong_bonus": 0.05, "concentration_weak_threshold": 0.25, "concentration_weak_malus": -0.05, "velocity_buy_coherent": 1.5, "velocity_sell_coherent": 0.7, "coherence_bonus": 0.03, "velocity_extreme": 2.5, "velocity_extreme_malus": -0.02},
-                "multiplier_clamp": {"min": 0.5, "max": 1.5}
+                "multipliers": {
+                    "EXCELLENT": 1.20,
+                    "GOOD": 1.10,
+                    "FAIR": 1.00,
+                    "POOR": 0.80,
+                    "VETO": 0.50,
+                },
+                "veto_conditions": {
+                    "timing_score_threshold": 1.5,
+                    "concentration_threshold": 0.20,
+                    "velocity_ratio_extreme": 4.0,
+                    "poor_score_threshold": 1.0,
+                },
+                "bonuses_malus": {
+                    "concentration_strong_threshold": 0.50,
+                    "concentration_strong_bonus": 0.05,
+                    "concentration_weak_threshold": 0.25,
+                    "concentration_weak_malus": -0.05,
+                    "velocity_buy_coherent": 1.5,
+                    "velocity_sell_coherent": 0.7,
+                    "coherence_bonus": 0.03,
+                    "velocity_extreme": 2.5,
+                    "velocity_extreme_malus": -0.02,
+                },
+                "multiplier_clamp": {"min": 0.5, "max": 1.5},
             }
 
     def calculate_impact(self, timing_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -125,9 +159,13 @@ class USDJPYTimingOptimizer:
         # ========================================================================
         veto_cfg = self.config.get("veto_conditions", {})
         veto_conditions = [
-            timing_score < veto_cfg.get("timing_score_threshold", 1.5) and max(buy_conc, sell_conc) < veto_cfg.get("concentration_threshold", 0.20),
-            timing_score < 2.0 and velocity_ratio > veto_cfg.get("velocity_ratio_extreme", 4.0),
-            timing_quality == "POOR" and timing_score < veto_cfg.get("poor_score_threshold", 1.0)
+            timing_score < veto_cfg.get("timing_score_threshold", 1.5)
+            and max(buy_conc, sell_conc)
+            < veto_cfg.get("concentration_threshold", 0.20),
+            timing_score < 2.0
+            and velocity_ratio > veto_cfg.get("velocity_ratio_extreme", 4.0),
+            timing_quality == "POOR"
+            and timing_score < veto_cfg.get("poor_score_threshold", 1.0),
         ]
 
         multipliers_cfg = self.config.get("multipliers", {})
@@ -136,7 +174,7 @@ class USDJPYTimingOptimizer:
                 "multiplier": multipliers_cfg.get("VETO", 0.50),
                 "veto_triggered": True,
                 "veto_reason": "Timing catastrophique: score faible + concentration insuffisante",
-                "adjustment_details": f"VETO appliqué (×{multipliers_cfg.get('VETO', 0.50)})"
+                "adjustment_details": f"VETO appliqué (×{multipliers_cfg.get('VETO', 0.50)})",
             }
 
         # ========================================================================
@@ -156,7 +194,9 @@ class USDJPYTimingOptimizer:
         conc_strong_bonus = bonus_malus.get("concentration_strong_bonus", 0.05)
         if max(buy_conc, sell_conc) > conc_strong:
             adjustment += conc_strong_bonus
-            adjustment_reasons.append(f"Concentration forte (>{conc_strong:.0%}): {conc_strong_bonus:+.0%}")
+            adjustment_reasons.append(
+                f"Concentration forte (>{conc_strong:.0%}): {conc_strong_bonus:+.0%}"
+            )
 
         # Bonus pour cohérence directionnelle (concentration + velocity alignées)
         vel_buy_coh = bonus_malus.get("velocity_buy_coherent", 1.5)
@@ -164,24 +204,32 @@ class USDJPYTimingOptimizer:
         coh_bonus = bonus_malus.get("coherence_bonus", 0.03)
         if buy_conc > sell_conc and velocity_ratio > vel_buy_coh:
             adjustment += coh_bonus
-            adjustment_reasons.append(f"Cohérence buy (conc={buy_conc:.0%}, vel={velocity_ratio:.2f}): {coh_bonus:+.0%}")
+            adjustment_reasons.append(
+                f"Cohérence buy (conc={buy_conc:.0%}, vel={velocity_ratio:.2f}): {coh_bonus:+.0%}"
+            )
         elif sell_conc > buy_conc and velocity_ratio < vel_sell_coh:
             adjustment += coh_bonus
-            adjustment_reasons.append(f"Cohérence sell (conc={sell_conc:.0%}, vel={velocity_ratio:.2f}): {coh_bonus:+.0%}")
+            adjustment_reasons.append(
+                f"Cohérence sell (conc={sell_conc:.0%}, vel={velocity_ratio:.2f}): {coh_bonus:+.0%}"
+            )
 
         # Malus pour concentration faible
         conc_weak = bonus_malus.get("concentration_weak_threshold", 0.25)
         conc_weak_malus = bonus_malus.get("concentration_weak_malus", -0.05)
         if max(buy_conc, sell_conc) < conc_weak:
             adjustment += conc_weak_malus
-            adjustment_reasons.append(f"Concentration faible (<{conc_weak:.0%}): {conc_weak_malus:+.0%}")
+            adjustment_reasons.append(
+                f"Concentration faible (<{conc_weak:.0%}): {conc_weak_malus:+.0%}"
+            )
 
         # Malus pour velocity ratio extrême (possible anomalie)
         vel_extreme = bonus_malus.get("velocity_extreme", 2.5)
         vel_extreme_malus = bonus_malus.get("velocity_extreme_malus", -0.02)
         if velocity_ratio > vel_extreme:
             adjustment += vel_extreme_malus
-            adjustment_reasons.append(f"Velocity ratio extrême ({velocity_ratio:.2f}): {vel_extreme_malus:+.0%}")
+            adjustment_reasons.append(
+                f"Velocity ratio extrême ({velocity_ratio:.2f}): {vel_extreme_malus:+.0%}"
+            )
 
         # ========================================================================
         # 4️⃣ CALCUL FINAL - avec clamp depuis config
@@ -205,7 +253,7 @@ class USDJPYTimingOptimizer:
             "multiplier": final_multiplier,
             "veto_triggered": False,
             "veto_reason": None,
-            "adjustment_details": adjustment_summary
+            "adjustment_details": adjustment_summary,
         }
 
 
@@ -326,38 +374,45 @@ class ScalpingStrategy(BaseStrategy):
 
         # Charger config OrderFlow V6
         of_config = self.strategy_config.get("orderflow_v6_config", {})
-        coherence_thresholds = of_config.get("coherence_thresholds", {
-            "strong": 0.75,
-            "moderate": 0.65,
-            "weak": 0.55
-        })
-        volume_classification = of_config.get("volume_ratio_classification", {
-            "spike": 1.8,
-            "elevated": 1.4,
-            "above_average": 1.15,
-            "normal": 0.85,
-            "moderate": 0.6
-        })
-        score_status = of_config.get("total_score_status", {
-            "strong_threshold": 28.0,
-            "moderate_threshold": 14.0,
-            "max_score": 50.0
-        })
-        absorption_ratios = of_config.get("absorption_ratios", {
-            "very_bullish": 0.72,
-            "bullish": 0.58,
-            "slightly_bullish": 0.52,
-            "neutral": 0.50,
-            "slightly_bearish": 0.48,
-            "bearish": 0.42,
-            "very_bearish": 0.28
-        })
+        coherence_thresholds = of_config.get(
+            "coherence_thresholds", {"strong": 0.75, "moderate": 0.65, "weak": 0.55}
+        )
+        volume_classification = of_config.get(
+            "volume_ratio_classification",
+            {
+                "spike": 1.8,
+                "elevated": 1.4,
+                "above_average": 1.15,
+                "normal": 0.85,
+                "moderate": 0.6,
+            },
+        )
+        score_status = of_config.get(
+            "total_score_status",
+            {"strong_threshold": 28.0, "moderate_threshold": 14.0, "max_score": 50.0},
+        )
+        absorption_ratios = of_config.get(
+            "absorption_ratios",
+            {
+                "very_bullish": 0.72,
+                "bullish": 0.58,
+                "slightly_bullish": 0.52,
+                "neutral": 0.50,
+                "slightly_bearish": 0.48,
+                "bearish": 0.42,
+                "very_bearish": 0.28,
+            },
+        )
 
         # ✅ FIX (31 DEC 2025): Fenêtres d'analyse DYNAMIQUES depuis config
         # Rapport scalping burst: coherence 10→3, volume 14→6, lookback 20→10
         analysis_windows = of_config.get("analysis_windows", {})
-        delta_coherence_bars = int(analysis_windows.get("delta_coherence_bars", 3))  # Default 3 (optimisé burst)
-        volume_avg_bars = int(analysis_windows.get("volume_avg_bars", 6))  # Default 6 (optimisé burst)
+        delta_coherence_bars = int(
+            analysis_windows.get("delta_coherence_bars", 3)
+        )  # Default 3 (optimisé burst)
+        volume_avg_bars = int(
+            analysis_windows.get("volume_avg_bars", 6)
+        )  # Default 6 (optimisé burst)
 
         try:
             # ================================================================
@@ -367,7 +422,9 @@ class ScalpingStrategy(BaseStrategy):
             mtf_details = {}
 
             # Charger seuils MTF depuis config (comme Momentum)
-            mtf_cfg = self.strategy_config.get("momentum_institutional_config", {}).get("mtf_alignment", {})
+            mtf_cfg = self.strategy_config.get("momentum_institutional_config", {}).get(
+                "mtf_alignment", {}
+            )
             if not mtf_cfg:
                 # Fallback vers config globale
                 mtf_cfg = {"bullish_threshold": 0.67, "bearish_threshold": 0.33}
@@ -375,22 +432,29 @@ class ScalpingStrategy(BaseStrategy):
             bearish_threshold = mtf_cfg.get("bearish_threshold", 0.33)
 
             import logging
+
             logger = logging.getLogger(__name__)
 
             # M1 : 1 bougie → Momentum INSTANTANÉ (31 DEC 2025: Réduit de 2→1 pour ultra-réactivité)
             if df_m1 is not None and len(df_m1) >= 1:
-                m1_dir = calculate_mtf_direction_unified(df_m1, 1, bullish_threshold, bearish_threshold)
+                m1_dir = calculate_mtf_direction_unified(
+                    df_m1, 1, bullish_threshold, bearish_threshold
+                )
                 result["mtf_alignment"]["m1"] = m1_dir.lower()
 
                 # Compter bougies pour debug/détails
                 m1_closes = df_m1["close"].tail(1).values
                 m1_opens = df_m1["open"].tail(1).values
-                m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
+                m1_bullish = sum(
+                    1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i]
+                )
                 m1_bearish = 1 - m1_bullish
 
-                logger.debug(f"🔍 [MTF_M1_UNIFIED] Bougies: {m1_bullish}v/{m1_bearish}r | "
-                               f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
-                               f"Direction: {m1_dir}")
+                logger.debug(
+                    f"🔍 [MTF_M1_UNIFIED] Bougies: {m1_bullish}v/{m1_bearish}r | "
+                    f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
+                    f"Direction: {m1_dir}"
+                )
 
                 mtf_details["m1"] = {
                     "bullish_bars": m1_bullish,
@@ -400,18 +464,24 @@ class ScalpingStrategy(BaseStrategy):
 
             # M3 : 1 bougie → Structure burst INSTANTANÉE (31 DEC 2025: Réduit de 2→1 pour ultra-réactivité)
             if df_m3 is not None and len(df_m3) >= 1:
-                m3_dir = calculate_mtf_direction_unified(df_m3, 1, bullish_threshold, bearish_threshold)
+                m3_dir = calculate_mtf_direction_unified(
+                    df_m3, 1, bullish_threshold, bearish_threshold
+                )
                 result["mtf_alignment"]["m3"] = m3_dir.lower()
 
                 # Compter bougies pour debug/détails
                 m3_closes = df_m3["close"].tail(1).values
                 m3_opens = df_m3["open"].tail(1).values
-                m3_bullish = sum(1 for i in range(len(m3_closes)) if m3_closes[i] > m3_opens[i])
+                m3_bullish = sum(
+                    1 for i in range(len(m3_closes)) if m3_closes[i] > m3_opens[i]
+                )
                 m3_bearish = 1 - m3_bullish
 
-                logger.debug(f"🔍 [MTF_M3_UNIFIED] Bougies: {m3_bullish}v/{m3_bearish}r | "
-                               f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
-                               f"Direction: {m3_dir}")
+                logger.debug(
+                    f"🔍 [MTF_M3_UNIFIED] Bougies: {m3_bullish}v/{m3_bearish}r | "
+                    f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
+                    f"Direction: {m3_dir}"
+                )
 
                 mtf_details["m3"] = {
                     "bullish_bars": m3_bullish,
@@ -421,13 +491,17 @@ class ScalpingStrategy(BaseStrategy):
 
             # M5 : 1 bougie → Contexte INSTANTANÉ (31 DEC 2025: Réduit de 2→1 pour ultra-réactivité)
             if df_m5 is not None and len(df_m5) >= 1:
-                m5_dir = calculate_mtf_direction_unified(df_m5, 1, bullish_threshold, bearish_threshold)
+                m5_dir = calculate_mtf_direction_unified(
+                    df_m5, 1, bullish_threshold, bearish_threshold
+                )
                 result["mtf_alignment"]["m5"] = m5_dir.lower()
 
                 # Compter bougies pour debug/détails
                 m5_closes = df_m5["close"].tail(1).values
                 m5_opens = df_m5["open"].tail(1).values
-                m5_bullish = sum(1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i])
+                m5_bullish = sum(
+                    1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i]
+                )
                 m5_bearish = 1 - m5_bullish
 
                 mtf_details["m5"] = {
@@ -477,14 +551,22 @@ class ScalpingStrategy(BaseStrategy):
 
                     # Extraire timestamp de la bougie
                     if "time" in df_m1.columns:
-                        candle_start = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
+                        candle_start = pd.to_datetime(
+                            last_candle["time"], utc=True, errors="coerce"
+                        )
                     else:
-                        candle_start = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
+                        candle_start = pd.to_datetime(
+                            last_candle.name, utc=True, errors="coerce"
+                        )
 
                     candle_end = candle_start + pd.Timedelta(minutes=1)
 
                     # 🔍 LOG (26 DEC 2025): Afficher bougie analysée (01 JAN 2026: DEBUG pour console propre)
-                    candle_color = "🟢 VERTE" if last_candle["close"] > last_candle["open"] else "🔴 ROUGE"
+                    candle_color = (
+                        "🟢 VERTE"
+                        if last_candle["close"] > last_candle["open"]
+                        else "🔴 ROUGE"
+                    )
                     self.logger.debug(
                         f"[ORDERFLOW_CANDLE_ANALYZED][{asset}] Bougie M1 analysée: {candle_start} | "
                         f"O={last_candle['open']:.3f} C={last_candle['close']:.3f} | {candle_color}"
@@ -492,22 +574,26 @@ class ScalpingStrategy(BaseStrategy):
 
                     # Charger ticks pour cette fenêtre M1
                     ticks_df = self.mt5_connector.get_ticks_for_candle(
-                        asset,
-                        candle_start.to_pydatetime(),
-                        candle_end.to_pydatetime()
+                        asset, candle_start.to_pydatetime(), candle_end.to_pydatetime()
                     )
 
                     if ticks_df is not None and len(ticks_df) > 0:
                         # Calculer buy/sell volume depuis la colonne 'side'
-                        buy_ticks = ticks_df[ticks_df['side'] == 'buy']
-                        sell_ticks = ticks_df[ticks_df['side'] == 'sell']
+                        buy_ticks = ticks_df[ticks_df["side"] == "buy"]
+                        sell_ticks = ticks_df[ticks_df["side"] == "sell"]
 
-                        buy_volume = buy_ticks['volume'].sum() if len(buy_ticks) > 0 else 0.0
-                        sell_volume = sell_ticks['volume'].sum() if len(sell_ticks) > 0 else 0.0
+                        buy_volume = (
+                            buy_ticks["volume"].sum() if len(buy_ticks) > 0 else 0.0
+                        )
+                        sell_volume = (
+                            sell_ticks["volume"].sum() if len(sell_ticks) > 0 else 0.0
+                        )
                         total_volume = buy_volume + sell_volume
 
                         delta_total = buy_volume - sell_volume
-                        imbalance = buy_volume / total_volume if total_volume > 0 else 0.5
+                        imbalance = (
+                            buy_volume / total_volume if total_volume > 0 else 0.5
+                        )
 
                         # Calculer imbalances buy/sell
                         # En Forex, volume=1.0 pour tous les ticks → utiliser le ratio de ticks
@@ -529,7 +615,11 @@ class ScalpingStrategy(BaseStrategy):
 
                         # 🔍 LOG (05 JAN 2026): Détecter ticks non classés (WARNING si >10%, sinon DEBUG)
                         if unknown_count > 0:
-                            unknown_pct = (unknown_count / total_count * 100) if total_count > 0 else 0
+                            unknown_pct = (
+                                (unknown_count / total_count * 100)
+                                if total_count > 0
+                                else 0
+                            )
                             if unknown_pct > 10:
                                 self.logger.warning(
                                     f"[ORDERFLOW_TICKS_UNKNOWN][{asset}] {unknown_count} ticks non classés ({unknown_pct:.1f}%, total={total_count})"
@@ -543,12 +633,18 @@ class ScalpingStrategy(BaseStrategy):
                         # Si > 60% buy → imbalance buy
                         # Si > 60% sell → imbalance sell
                         buy_ratio = buy_count / total_count if total_count > 0 else 0.5
-                        sell_ratio = sell_count / total_count if total_count > 0 else 0.5
+                        sell_ratio = (
+                            sell_count / total_count if total_count > 0 else 0.5
+                        )
 
                         # Score basé sur le déséquilibre (29 DEC 2025: * 40 pour USDJPY sensibilité)
                         # 50% → 0, 52.5% → 1, 55% → 2, 60% → 4, 65% → 6, 70% → 8, 75% → 10
-                        imbalance_buy = max(0, int((buy_ratio - 0.5) * 40))  # 0-10 scale (doublé de 20 → 40)
-                        imbalance_sell = max(0, int((sell_ratio - 0.5) * 40))  # 0-10 scale (doublé de 20 → 40)
+                        imbalance_buy = max(
+                            0, int((buy_ratio - 0.5) * 40)
+                        )  # 0-10 scale (doublé de 20 → 40)
+                        imbalance_sell = max(
+                            0, int((sell_ratio - 0.5) * 40)
+                        )  # 0-10 scale (doublé de 20 → 40)
 
                         # Construire fp_summary avec les données calculées
                         fp_summary = {
@@ -561,11 +657,15 @@ class ScalpingStrategy(BaseStrategy):
                             "imbalance_sell": imbalance_sell,
                             "tick_count": len(ticks_df),
                             "buy_ratio": buy_ratio,
-                            "sell_ratio": sell_ratio
+                            "sell_ratio": sell_ratio,
                         }
 
                         # Déterminer direction delta
-                        delta_direction_calc = "BULLISH" if delta_total > 0 else "BEARISH" if delta_total < 0 else "NEUTRAL"
+                        delta_direction_calc = (
+                            "BULLISH"
+                            if delta_total > 0
+                            else "BEARISH" if delta_total < 0 else "NEUTRAL"
+                        )
 
                         # 06 JAN 2026: FORCE INFO (au lieu de DEBUG) pour diagnostiquer pourquoi pas de SELL
                         self.logger.info(
@@ -575,10 +675,15 @@ class ScalpingStrategy(BaseStrategy):
                             f"Imbalance={imbalance:.2f} | Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
                         )
                     else:
-                        self.logger.warning(f"[ORDERFLOW_TICKS_CALC][{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow")
+                        self.logger.warning(
+                            f"[ORDERFLOW_TICKS_CALC][{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow"
+                        )
 
                 except Exception as e_ticks:
-                    self.logger.error(f"[ORDERFLOW_TICKS_CALC][{asset}] ❌ Erreur calcul ticks: {e_ticks}", exc_info=True)
+                    self.logger.error(
+                        f"[ORDERFLOW_TICKS_CALC][{asset}] ❌ Erreur calcul ticks: {e_ticks}",
+                        exc_info=True,
+                    )
             else:
                 # 🔍 DEBUG (26 DEC 2025): Log si condition échoue (01 JAN 2026: DEBUG pour console propre)
                 self.logger.debug(
@@ -618,7 +723,9 @@ class ScalpingStrategy(BaseStrategy):
                     1 for i in range(len(closes)) if closes[i] < opens[i]
                 )
 
-                coherence = max(bullish_count, bearish_count) / float(delta_coherence_bars)  # 0.0 à 1.0
+                coherence = max(bullish_count, bearish_count) / float(
+                    delta_coherence_bars
+                )  # 0.0 à 1.0
                 delta_details["coherence"] = coherence
                 delta_details["bullish_bars"] = bullish_count
                 delta_details["bearish_bars"] = bearish_count
@@ -631,7 +738,9 @@ class ScalpingStrategy(BaseStrategy):
 
                     # ✅ FIX (03 DEC 2025): Seuils adaptés SCALPING M1 (ticks temps réel sur 60s)
                     # Delta fort cohérent → 15-25 pts
-                    if coherence >= coherence_thresholds["strong"]:  # Strong coherence (config)
+                    if (
+                        coherence >= coherence_thresholds["strong"]
+                    ):  # Strong coherence (config)
                         if (
                             abs(delta_total) >= 50
                         ):  # ~28% déséquilibre (ex: 114 buy / 66 sell sur 180 ticks)
@@ -649,7 +758,9 @@ class ScalpingStrategy(BaseStrategy):
                         ):  # ~3% déséquilibre (ex: 92 buy / 88 sell)
                             delta_momentum_score = 15.0  # Moyen
                     # Delta modéré → 10-15 pts
-                    elif coherence >= coherence_thresholds["moderate"]:  # Moderate coherence (config)
+                    elif (
+                        coherence >= coherence_thresholds["moderate"]
+                    ):  # Moderate coherence (config)
                         if abs(delta_total) >= 30:
                             delta_momentum_score = 15.0
                         elif abs(delta_total) >= 15:
@@ -657,7 +768,9 @@ class ScalpingStrategy(BaseStrategy):
                         elif abs(delta_total) >= 5:
                             delta_momentum_score = 10.0
                     # Delta faible cohérence → 5-10 pts
-                    elif coherence >= coherence_thresholds["weak"]:  # Weak coherence (config)
+                    elif (
+                        coherence >= coherence_thresholds["weak"]
+                    ):  # Weak coherence (config)
                         if abs(delta_total) >= 15:
                             delta_momentum_score = 10.0
                         else:
@@ -715,7 +828,9 @@ class ScalpingStrategy(BaseStrategy):
                 volume_details["current_volume"] = float(current_tick_count)
                 volume_details["avg_volume"] = float(avg_volume)
                 volume_details["volume_ratio"] = volume_ratio  # FIX: Clé pour rapport
-                volume_details["total_ticks"] = int(current_tick_count)  # FIX: Clé pour rapport
+                volume_details["total_ticks"] = int(
+                    current_tick_count
+                )  # FIX: Clé pour rapport
 
                 # ✅ POC depuis footprint_summary (VRAI POC calculé depuis profil de volume)
                 poc_price = fp_summary.get("poc")
@@ -728,7 +843,9 @@ class ScalpingStrategy(BaseStrategy):
                     volume_details["spike_detected"] = True
                 elif volume_ratio >= volume_classification["elevated"]:  # Volume élevé
                     volume_confirmation_score = 12.0
-                elif volume_ratio >= volume_classification["above_average"]:  # Volume au-dessus moyenne
+                elif (
+                    volume_ratio >= volume_classification["above_average"]
+                ):  # Volume au-dessus moyenne
                     volume_confirmation_score = 10.0
                 elif volume_ratio >= volume_classification["normal"]:  # Volume normal
                     volume_confirmation_score = 7.0
@@ -839,11 +956,11 @@ class ScalpingStrategy(BaseStrategy):
                 progressive_score += 30.0
             elif delta_momentum_score >= 12.0:  # Delta modéré-fort
                 progressive_score += 25.0
-            elif delta_momentum_score >= 8.0:   # Delta modéré
+            elif delta_momentum_score >= 8.0:  # Delta modéré
                 progressive_score += 15.0
-            elif delta_momentum_score >= 5.0:   # Delta faible
+            elif delta_momentum_score >= 5.0:  # Delta faible
                 progressive_score += 10.0
-            elif delta_momentum_score > 0.0:    # Delta minimal
+            elif delta_momentum_score > 0.0:  # Delta minimal
                 progressive_score += 5.0
 
             # 2. VOLUME CONFIRMATION (0-30 points progressifs)
@@ -851,11 +968,11 @@ class ScalpingStrategy(BaseStrategy):
                 progressive_score += 30.0
             elif volume_confirmation_score >= 10.0:  # Volume fort
                 progressive_score += 25.0
-            elif volume_confirmation_score >= 7.0:   # Volume modéré
+            elif volume_confirmation_score >= 7.0:  # Volume modéré
                 progressive_score += 15.0
-            elif volume_confirmation_score >= 5.0:   # Volume faible
+            elif volume_confirmation_score >= 5.0:  # Volume faible
                 progressive_score += 10.0
-            elif volume_confirmation_score > 0.0:    # Volume minimal
+            elif volume_confirmation_score > 0.0:  # Volume minimal
                 progressive_score += 5.0
 
             # 3. IMBALANCE STRENGTH (0-20 points progressifs)
@@ -877,7 +994,7 @@ class ScalpingStrategy(BaseStrategy):
                 progressive_score += 7.0
             elif coherence_pct >= 0.33:  # 33%+ cohérence
                 progressive_score += 5.0
-            elif coherence_pct > 0.0:   # Cohérence minimale
+            elif coherence_pct > 0.0:  # Cohérence minimale
                 progressive_score += 2.0
 
             # Score final (0-100)
@@ -965,7 +1082,9 @@ class ScalpingStrategy(BaseStrategy):
                 from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer
                 from phase_observer.market_fatigue_analyzer import MarketFatigueAnalyzer
                 from phase_observer.market_physics_analyzer import MarketPhysicsAnalyzer
-                from phase_observer.microstructure_analyzer import MicrostructureAnalyzer
+                from phase_observer.microstructure_analyzer import (
+                    MicrostructureAnalyzer,
+                )
                 from phase_observer.liquidity_heatmap import LiquidityHeatmap
 
                 institutional_analysis = {}
@@ -983,8 +1102,10 @@ class ScalpingStrategy(BaseStrategy):
                     )
 
                     # 🔧 FIX CRITIQUE: Colonnes requises par analyseurs institutionnels
-                    required_cols = ['time', 'side', 'volume', 'price']
-                    missing_cols = [col for col in required_cols if col not in ticks_df.columns]
+                    required_cols = ["time", "side", "volume", "price"]
+                    missing_cols = [
+                        col for col in required_cols if col not in ticks_df.columns
+                    ]
 
                     if missing_cols:
                         self.logger.warning(
@@ -995,39 +1116,57 @@ class ScalpingStrategy(BaseStrategy):
                         ticks_df = ticks_df.copy()
 
                         # Ajouter colonnes manquantes avec valeurs par défaut
-                        if 'volume' in missing_cols:
-                            ticks_df['volume'] = 1.0  # Standard Forex: 1 tick = 1 volume
-                        if 'price' in missing_cols:
+                        if "volume" in missing_cols:
+                            ticks_df["volume"] = (
+                                1.0  # Standard Forex: 1 tick = 1 volume
+                            )
+                        if "price" in missing_cols:
                             # Utiliser 'last' si disponible, sinon mid
-                            if 'last' in ticks_df.columns:
-                                ticks_df['price'] = ticks_df['last']
-                            elif 'mid' in ticks_df.columns:
-                                ticks_df['price'] = ticks_df['mid']
-                            elif 'bid' in ticks_df.columns:
-                                ticks_df['price'] = ticks_df['bid']
+                            if "last" in ticks_df.columns:
+                                ticks_df["price"] = ticks_df["last"]
+                            elif "mid" in ticks_df.columns:
+                                ticks_df["price"] = ticks_df["mid"]
+                            elif "bid" in ticks_df.columns:
+                                ticks_df["price"] = ticks_df["bid"]
                             else:
-                                self.logger.error(f"[{asset}] ❌ Impossible de créer colonne 'price' (pas de last/mid/bid)")
-                                ticks_df['price'] = 0.0
-                        if 'side' in missing_cols:
-                            self.logger.error(f"[{asset}] ❌ Colonne 'side' manquante - analyseurs ne fonctionneront pas correctement")
-                            ticks_df['side'] = 'unknown'
-                        if 'time' in missing_cols:
-                            self.logger.error(f"[{asset}] ❌ Colonne 'time' manquante - timestamp unavailable")
-                            ticks_df['time'] = pd.Timestamp.now(tz='UTC')
+                                self.logger.error(
+                                    f"[{asset}] ❌ Impossible de créer colonne 'price' (pas de last/mid/bid)"
+                                )
+                                ticks_df["price"] = 0.0
+                        if "side" in missing_cols:
+                            self.logger.error(
+                                f"[{asset}] ❌ Colonne 'side' manquante - analyseurs ne fonctionneront pas correctement"
+                            )
+                            ticks_df["side"] = "unknown"
+                        if "time" in missing_cols:
+                            self.logger.error(
+                                f"[{asset}] ❌ Colonne 'time' manquante - timestamp unavailable"
+                            )
+                            ticks_df["time"] = pd.Timestamp.now(tz="UTC")
 
-                        self.logger.info(f"[{asset}] ✅ Colonnes ajoutées: {missing_cols}")
+                        self.logger.info(
+                            f"[{asset}] ✅ Colonnes ajoutées: {missing_cols}"
+                        )
                 else:
                     self.logger.warning(f"[{asset}] ⚠️ ticks_df est None!")
 
                 # 1. PRIORITY_1: Price Memory (mémoire du prix)
                 try:
                     price_memory = PriceMemoryAnalyzer(logger=self.logger)
-                    memory_result = price_memory.analyze_price_memory(df_m1, result.get('current_price', df_m1.iloc[-1]['close'] if len(df_m1) > 0 else 0))
-                    institutional_analysis['price_memory'] = memory_result
-                    self.logger.debug(f"[{asset}] 🧠 PriceMemory: {len(memory_result.get('memory_signals', []))} signaux, {len(memory_result.get('fresh_levels', []))} niveaux frais")
+                    memory_result = price_memory.analyze_price_memory(
+                        df_m1,
+                        result.get(
+                            "current_price",
+                            df_m1.iloc[-1]["close"] if len(df_m1) > 0 else 0,
+                        ),
+                    )
+                    institutional_analysis["price_memory"] = memory_result
+                    self.logger.debug(
+                        f"[{asset}] 🧠 PriceMemory: {len(memory_result.get('memory_signals', []))} signaux, {len(memory_result.get('fresh_levels', []))} niveaux frais"
+                    )
                 except Exception as e_memory:
                     self.logger.debug(f"[{asset}] PriceMemory error: {e_memory}")
-                    institutional_analysis['price_memory'] = {}
+                    institutional_analysis["price_memory"] = {}
 
                 # 2. PRIORITY_2: Market Fatigue (épuisement acheteurs/vendeurs)
                 try:
@@ -1045,25 +1184,36 @@ class ScalpingStrategy(BaseStrategy):
                     # 🔧 FIX CRITIQUE (06 JAN 2026): df_m1 n'a pas de colonne 'volume' en MT5 Forex
                     # Créer copie avec 'volume' depuis 'tick_volume' si disponible
                     df_m1_for_fatigue = df_m1.tail(20).copy()
-                    if 'volume' not in df_m1_for_fatigue.columns:
-                        if 'tick_volume' in df_m1_for_fatigue.columns:
-                            df_m1_for_fatigue['volume'] = df_m1_for_fatigue['tick_volume']
-                            self.logger.debug(f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume'")
+                    if "volume" not in df_m1_for_fatigue.columns:
+                        if "tick_volume" in df_m1_for_fatigue.columns:
+                            df_m1_for_fatigue["volume"] = df_m1_for_fatigue[
+                                "tick_volume"
+                            ]
+                            self.logger.debug(
+                                f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume'"
+                            )
                         else:
-                            df_m1_for_fatigue['volume'] = 1.0  # Fallback
-                            self.logger.warning(f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1, utilise 1.0")
+                            df_m1_for_fatigue["volume"] = 1.0  # Fallback
+                            self.logger.warning(
+                                f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1, utilise 1.0"
+                            )
 
                     fatigue_analyzer = MarketFatigueAnalyzer(logger=self.logger)
-                    fatigue_result = fatigue_analyzer.calculate_fatigue_indicators(ticks_df, df_m1_for_fatigue)
-                    institutional_analysis['market_fatigue'] = fatigue_result
-                    self.logger.info(f"[{asset}] 😫 MarketFatigue RESULT: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}")
+                    fatigue_result = fatigue_analyzer.calculate_fatigue_indicators(
+                        ticks_df, df_m1_for_fatigue
+                    )
+                    institutional_analysis["market_fatigue"] = fatigue_result
+                    self.logger.info(
+                        f"[{asset}] 😫 MarketFatigue RESULT: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}"
+                    )
                 except Exception as e_fatigue:
                     import traceback
+
                     self.logger.warning(
                         f"[{asset}] ⚠️ MarketFatigue EXCEPTION: {e_fatigue}\n"
                         f"Traceback: {traceback.format_exc()}"
                     )
-                    institutional_analysis['market_fatigue'] = {}
+                    institutional_analysis["market_fatigue"] = {}
 
                 # 3. PRIORITY_3: Market Physics (lois physiques du marché)
                 try:
@@ -1078,62 +1228,87 @@ class ScalpingStrategy(BaseStrategy):
                     # 🔧 FIX CRITIQUE (06 JAN 2026): df_m1 n'a pas de colonne 'volume' en MT5 Forex
                     # Créer copie avec 'volume' depuis 'tick_volume' si disponible
                     df_m1_for_physics = df_m1.copy()
-                    if 'volume' not in df_m1_for_physics.columns:
-                        if 'tick_volume' in df_m1_for_physics.columns:
-                            df_m1_for_physics['volume'] = df_m1_for_physics['tick_volume']
-                            self.logger.debug(f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume' (Physics)")
+                    if "volume" not in df_m1_for_physics.columns:
+                        if "tick_volume" in df_m1_for_physics.columns:
+                            df_m1_for_physics["volume"] = df_m1_for_physics[
+                                "tick_volume"
+                            ]
+                            self.logger.debug(
+                                f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume' (Physics)"
+                            )
                         else:
-                            df_m1_for_physics['volume'] = 1.0  # Fallback
-                            self.logger.warning(f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1 (Physics), utilise 1.0")
+                            df_m1_for_physics["volume"] = 1.0  # Fallback
+                            self.logger.warning(
+                                f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1 (Physics), utilise 1.0"
+                            )
 
                     physics_analyzer = MarketPhysicsAnalyzer(logger=self.logger)
-                    physics_result = physics_analyzer.apply_physics_principles(ticks_df, df_m1_for_physics)
-                    institutional_analysis['market_physics'] = physics_result
-                    self.logger.info(f"[{asset}] ⚛️ MarketPhysics RESULT: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}")
+                    physics_result = physics_analyzer.apply_physics_principles(
+                        ticks_df, df_m1_for_physics
+                    )
+                    institutional_analysis["market_physics"] = physics_result
+                    self.logger.info(
+                        f"[{asset}] ⚛️ MarketPhysics RESULT: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}"
+                    )
                 except Exception as e_physics:
                     import traceback
+
                     self.logger.warning(
                         f"[{asset}] ⚠️ MarketPhysics EXCEPTION: {e_physics}\n"
                         f"Traceback: {traceback.format_exc()}"
                     )
-                    institutional_analysis['market_physics'] = {}
+                    institutional_analysis["market_physics"] = {}
 
                 # 4. PHASE 2: Microstructure (vitesse ruban, order imbalance)
                 try:
                     microstructure = MicrostructureAnalyzer(logger=self.logger)
                     if ticks_df is not None and len(ticks_df) > 10:
                         tape_speed = microstructure.analyze_tape_speed(ticks_df)
-                        institutional_analysis['tape_speed'] = tape_speed
-                        self.logger.debug(f"[{asset}] 🔬 TapeSpeed: {tape_speed.get('interpretation', 'N/A')}, ratio={tape_speed.get('speed_ratio', 0):.2f}")
+                        institutional_analysis["tape_speed"] = tape_speed
+                        self.logger.debug(
+                            f"[{asset}] 🔬 TapeSpeed: {tape_speed.get('interpretation', 'N/A')}, ratio={tape_speed.get('speed_ratio', 0):.2f}"
+                        )
 
                         # Momentum ignition
                         ignition = microstructure.detect_momentum_ignition(ticks_df)
                         if ignition:
-                            institutional_analysis['momentum_ignition'] = ignition[-1]  # Dernier signal
-                            self.logger.debug(f"[{asset}] 🚀 MomentumIgnition: {ignition[-1].get('side', 'N/A')} strength={ignition[-1].get('strength', 0):.1f}")
+                            institutional_analysis["momentum_ignition"] = ignition[
+                                -1
+                            ]  # Dernier signal
+                            self.logger.debug(
+                                f"[{asset}] 🚀 MomentumIgnition: {ignition[-1].get('side', 'N/A')} strength={ignition[-1].get('strength', 0):.1f}"
+                            )
                 except Exception as e_micro:
                     self.logger.debug(f"[{asset}] Microstructure error: {e_micro}")
-                    institutional_analysis['tape_speed'] = {}
+                    institutional_analysis["tape_speed"] = {}
 
                 # 5. PHASE 2: Liquidity Heatmap (pression buy/sell, liquidity grabs)
                 try:
                     liquidity_map = LiquidityHeatmap(logger=self.logger)
                     if ticks_df is not None and len(ticks_df) > 10:
-                        pressure = liquidity_map.calculate_pressure_ratio(ticks_df, window_seconds=5.0)
-                        institutional_analysis['pressure_ratio'] = pressure
-                        self.logger.debug(f"[{asset}] 💧 Pressure: {pressure.get('direction', 'N/A')}, normalized={pressure.get('normalized_pressure', 0):.2f}")
+                        pressure = liquidity_map.calculate_pressure_ratio(
+                            ticks_df, window_seconds=5.0
+                        )
+                        institutional_analysis["pressure_ratio"] = pressure
+                        self.logger.debug(
+                            f"[{asset}] 💧 Pressure: {pressure.get('direction', 'N/A')}, normalized={pressure.get('normalized_pressure', 0):.2f}"
+                        )
 
                         # Liquidity grabs
                         grabs = liquidity_map.detect_liquidity_grab(ticks_df)
                         if grabs:
-                            institutional_analysis['liquidity_grabs'] = grabs
-                            self.logger.debug(f"[{asset}] 🎯 LiquidityGrab: {grabs[0].get('type', 'N/A')} @ {grabs[0].get('level', 0)}")
+                            institutional_analysis["liquidity_grabs"] = grabs
+                            self.logger.debug(
+                                f"[{asset}] 🎯 LiquidityGrab: {grabs[0].get('type', 'N/A')} @ {grabs[0].get('level', 0)}"
+                            )
                 except Exception as e_liquidity:
-                    self.logger.debug(f"[{asset}] LiquidityHeatmap error: {e_liquidity}")
-                    institutional_analysis['pressure_ratio'] = {}
+                    self.logger.debug(
+                        f"[{asset}] LiquidityHeatmap error: {e_liquidity}"
+                    )
+                    institutional_analysis["pressure_ratio"] = {}
 
                 # Ajouter au résultat final (en parallèle de l'OrderFlow V6 actuel)
-                result['institutional_analysis'] = institutional_analysis
+                result["institutional_analysis"] = institutional_analysis
 
                 self.logger.info(
                     f"[{asset}] 📊 INSTITUTIONAL ANALYSIS: "
@@ -1144,11 +1319,16 @@ class ScalpingStrategy(BaseStrategy):
                 )
 
             except ImportError as e_import:
-                self.logger.warning(f"[{asset}] Impossible importer analyseurs institutionnels: {e_import}")
-                result['institutional_analysis'] = {}
+                self.logger.warning(
+                    f"[{asset}] Impossible importer analyseurs institutionnels: {e_import}"
+                )
+                result["institutional_analysis"] = {}
             except Exception as e_inst:
-                self.logger.error(f"[{asset}] Erreur analyse institutionnelle: {e_inst}", exc_info=True)
-                result['institutional_analysis'] = {}
+                self.logger.error(
+                    f"[{asset}] Erreur analyse institutionnelle: {e_inst}",
+                    exc_info=True,
+                )
+                result["institutional_analysis"] = {}
 
         except Exception as e:
             self.logger.error(
@@ -1190,11 +1370,10 @@ class ScalpingStrategy(BaseStrategy):
         """
         # Charger config OrderFlow V6 pour les seuils de statut
         of_config = self.strategy_config.get("orderflow_v6_config", {})
-        score_status = of_config.get("total_score_status", {
-            "strong_threshold": 28.0,
-            "moderate_threshold": 14.0,
-            "max_score": 50.0
-        })
+        score_status = of_config.get(
+            "total_score_status",
+            {"strong_threshold": 28.0, "moderate_threshold": 14.0, "max_score": 50.0},
+        )
 
         # Appeler la fonction d'analyse existante
         result = self._analyze_orderflow_v6(
@@ -1235,7 +1414,9 @@ class ScalpingStrategy(BaseStrategy):
         # Déterminer status selon qualité du score (depuis config)
         if total_score >= score_status["strong_threshold"]:  # Strong status (config)
             status = "VALID"
-        elif total_score >= score_status["moderate_threshold"]:  # Moderate status (config)
+        elif (
+            total_score >= score_status["moderate_threshold"]
+        ):  # Moderate status (config)
             status = "WEAK"
         else:
             status = "SUSPECT"
@@ -1288,15 +1469,18 @@ class ScalpingStrategy(BaseStrategy):
 
         # Charger config OrderFlow V6 pour absorption_ratios
         of_config = self.strategy_config.get("orderflow_v6_config", {})
-        absorption_ratios = of_config.get("absorption_ratios", {
-            "very_bullish": 0.72,
-            "bullish": 0.58,
-            "slightly_bullish": 0.52,
-            "neutral": 0.50,
-            "slightly_bearish": 0.48,
-            "bearish": 0.42,
-            "very_bearish": 0.28
-        })
+        absorption_ratios = of_config.get(
+            "absorption_ratios",
+            {
+                "very_bullish": 0.72,
+                "bullish": 0.58,
+                "slightly_bullish": 0.52,
+                "neutral": 0.50,
+                "slightly_bearish": 0.48,
+                "bearish": 0.42,
+                "very_bearish": 0.28,
+            },
+        )
 
         try:
             # ✅ FIX (1er Décembre 2025): orchestrator stocke SEULEMENT "summary" (pas la structure complète)
@@ -1352,16 +1536,24 @@ class ScalpingStrategy(BaseStrategy):
                 elif buy_ratio >= absorption_ratios["bullish"]:  # Bullish
                     absorption_score = 10.0
                     absorption_details["bias"] = "BULLISH"
-                elif buy_ratio >= absorption_ratios["slightly_bullish"]:  # Légèrement bullish
+                elif (
+                    buy_ratio >= absorption_ratios["slightly_bullish"]
+                ):  # Légèrement bullish
                     absorption_score = 7.5
                     absorption_details["bias"] = "SLIGHTLY_BULLISH"
-                elif buy_ratio <= absorption_ratios["very_bearish"]:  # Fort bearish (sell_ratio >= very_bullish)
+                elif (
+                    buy_ratio <= absorption_ratios["very_bearish"]
+                ):  # Fort bearish (sell_ratio >= very_bullish)
                     absorption_score = 12.5
                     absorption_details["bias"] = "STRONG BEARISH"
-                elif buy_ratio <= absorption_ratios["bearish"]:  # Bearish (sell_ratio >= bullish)
+                elif (
+                    buy_ratio <= absorption_ratios["bearish"]
+                ):  # Bearish (sell_ratio >= bullish)
                     absorption_score = 10.0
                     absorption_details["bias"] = "BEARISH"
-                elif buy_ratio <= absorption_ratios["slightly_bearish"]:  # Légèrement bearish (sell_ratio >= slightly_bullish)
+                elif (
+                    buy_ratio <= absorption_ratios["slightly_bearish"]
+                ):  # Légèrement bearish (sell_ratio >= slightly_bullish)
                     absorption_score = 7.5
                     absorption_details["bias"] = "SLIGHTLY_BEARISH"
                 else:
@@ -1522,7 +1714,9 @@ class ScalpingStrategy(BaseStrategy):
 
             if asset == "USDJPY" and timing_metrics:
                 # Calculer impact timing via optimizer
-                timing_impact = self.USDJPY_timing_optimizer.calculate_impact(timing_metrics)
+                timing_impact = self.USDJPY_timing_optimizer.calculate_impact(
+                    timing_metrics
+                )
 
                 # Appliquer multiplicateur
                 multiplier = timing_impact.get("multiplier", 1.0)
@@ -1592,7 +1786,9 @@ class ScalpingStrategy(BaseStrategy):
         footprint_result: Dict[str, Any],
         final_score: float,  # ⚠️ Ce paramètre ne sera PLUS utilisé pour le total 100pts
         action: Optional[str],
-        momentum_result: Optional[Dict[str, Any]] = None,  # 📊 AJOUTÉ (18 DEC 2025): Optionnel!
+        momentum_result: Optional[
+            Dict[str, Any]
+        ] = None,  # 📊 AJOUTÉ (18 DEC 2025): Optionnel!
         vwap_score_pct: float = 0.0,
         vwap_status: str = "N/A",
         vwap_regime: Optional[str] = None,
@@ -1722,7 +1918,9 @@ class ScalpingStrategy(BaseStrategy):
             )  # 0-20 points
 
             # Calcul du TOTAL NORMALISÉ (0-100 points)
-            total_normalise = of_score_norm + fp_score_norm + mom_score_norm + vwap_score_norm
+            total_normalise = (
+                of_score_norm + fp_score_norm + mom_score_norm + vwap_score_norm
+            )
 
             # ================================================================
             # 4. LOGGING DU RAPPORT CONSOLIDÉ
@@ -1740,10 +1938,18 @@ class ScalpingStrategy(BaseStrategy):
             m5_dir = mtf_alignment.get("m5", "N/A")
             mtf_aligned = orderflow_result.get("mtf_aligned", False)
 
-            self.logger.info(f"\n⏱️ PÉRIODES MULTI-TIMEFRAME (BURST SCALPING - ULTRA RÉACTIF) :")
-            self.logger.info(f"   • M1 (1 bougie OF / 1 bougie MOM) → Momentum  : {m1_dir.upper()}")
-            self.logger.info(f"   • M3 (1 bougie OF / 1 bougie MOM) → Burst     : {m3_dir.upper()}")
-            self.logger.info(f"   • M5 (1 bougie OF / 1 bougie MOM) → Contexte  : {m5_dir.upper()}")
+            self.logger.info(
+                f"\n⏱️ PÉRIODES MULTI-TIMEFRAME (BURST SCALPING - ULTRA RÉACTIF) :"
+            )
+            self.logger.info(
+                f"   • M1 (1 bougie OF / 1 bougie MOM) → Momentum  : {m1_dir.upper()}"
+            )
+            self.logger.info(
+                f"   • M3 (1 bougie OF / 1 bougie MOM) → Burst     : {m3_dir.upper()}"
+            )
+            self.logger.info(
+                f"   • M5 (1 bougie OF / 1 bougie MOM) → Contexte  : {m5_dir.upper()}"
+            )
 
             # ✅ CORRIGÉ (15 DEC 2025): Momentum réel basé sur bougies
             momentum_m1 = "N/A"
@@ -1861,7 +2067,9 @@ class ScalpingStrategy(BaseStrategy):
             timing_metrics_full = footprint_result.get("timing_metrics", {})
             timing_impact = footprint_result.get("timing_impact", {})
             timing_decision = footprint_result.get("timing_decision", "NO_TIMING")
-            base_score_before_timing = footprint_result.get("base_score_before_timing", 0.0)
+            base_score_before_timing = footprint_result.get(
+                "base_score_before_timing", 0.0
+            )
 
             if timing_score > 0:
                 self.logger.info(f"\n⏱️  TIMING QUALITY ({timing_score:.1f}/5.0 pts) :")
@@ -1893,18 +2101,28 @@ class ScalpingStrategy(BaseStrategy):
                     adjustment_details = timing_impact.get("adjustment_details", "N/A")
 
                     self.logger.info(f"\n   🎯 IMPACT SUR SCORE FOOTPRINT :")
-                    self.logger.info(f"      Score base       : {base_score_before_timing:.1f}/25 pts")
+                    self.logger.info(
+                        f"      Score base       : {base_score_before_timing:.1f}/25 pts"
+                    )
 
                     if veto_triggered:
                         veto_reason = timing_impact.get("veto_reason", "N/A")
-                        self.logger.warning(f"      ⚠️  VETO APPLIQUÉ  : ×{multiplier:.2f} (pénalité sévère)")
+                        self.logger.warning(
+                            f"      ⚠️  VETO APPLIQUÉ  : ×{multiplier:.2f} (pénalité sévère)"
+                        )
                         self.logger.warning(f"      Raison           : {veto_reason}")
-                        self.logger.warning(f"      Score final      : {footprint_result.get('total_score', 0):.1f}/30 pts")
+                        self.logger.warning(
+                            f"      Score final      : {footprint_result.get('total_score', 0):.1f}/30 pts"
+                        )
                     else:
                         impact_pct = (multiplier - 1.0) * 100
                         impact_sign = "+" if impact_pct > 0 else ""
-                        self.logger.info(f"      Multiplicateur   : ×{multiplier:.2f} ({impact_sign}{impact_pct:.0f}%)")
-                        self.logger.info(f"      Score ajusté     : {footprint_result.get('total_score', 0):.1f}/30 pts")
+                        self.logger.info(
+                            f"      Multiplicateur   : ×{multiplier:.2f} ({impact_sign}{impact_pct:.0f}%)"
+                        )
+                        self.logger.info(
+                            f"      Score ajusté     : {footprint_result.get('total_score', 0):.1f}/30 pts"
+                        )
 
                     self.logger.info(f"      Détails          : {adjustment_details}")
 
@@ -1915,41 +2133,67 @@ class ScalpingStrategy(BaseStrategy):
             )
             self.logger.info(f"   Direction       : {mom_direction}")
             self.logger.info(f"   Qualité         : {mom_quality}")
-            self.logger.info(f"   ├─ Candle Strength     : {mom_candle_score:.1f}/30 pts")
+            self.logger.info(
+                f"   ├─ Candle Strength     : {mom_candle_score:.1f}/30 pts"
+            )
 
             # Détails candles si disponibles
             candle_details = momentum_result.get("candle_details", {})
             if candle_details:
                 green_candles = candle_details.get("green_candles", 0)
                 total_candles = candle_details.get("total_candles", 8)
-                self.logger.info(f"   │  • Bougies vertes  : {green_candles}/{total_candles} ({green_candles/total_candles*100:.0f}%)")
-                self.logger.info(f"   │  • Body ratio moyen: {candle_details.get('avg_body_ratio', 0):.2f}")
+                self.logger.info(
+                    f"   │  • Bougies vertes  : {green_candles}/{total_candles} ({green_candles/total_candles*100:.0f}%)"
+                )
+                self.logger.info(
+                    f"   │  • Body ratio moyen: {candle_details.get('avg_body_ratio', 0):.2f}"
+                )
 
-            self.logger.info(f"   ├─ Volume Confirmation : {mom_volume_score:.1f}/25 pts")
+            self.logger.info(
+                f"   ├─ Volume Confirmation : {mom_volume_score:.1f}/25 pts"
+            )
 
             # Détails volume si disponibles
             volume_details = momentum_result.get("volume_details", {})
             if volume_details and volume_details.get("volume_available"):
-                self.logger.info(f"   │  • Volume ratio    : {volume_details.get('volume_ratio', 1.0):.2f}x")
-                self.logger.info(f"   │  • Accélération vol: {volume_details.get('volume_acceleration', 0)*100:+.0f}%")
+                self.logger.info(
+                    f"   │  • Volume ratio    : {volume_details.get('volume_ratio', 1.0):.2f}x"
+                )
+                self.logger.info(
+                    f"   │  • Accélération vol: {volume_details.get('volume_acceleration', 0)*100:+.0f}%"
+                )
 
-            self.logger.info(f"   ├─ Price Acceleration  : {mom_accel_score:.1f}/25 pts")
+            self.logger.info(
+                f"   ├─ Price Acceleration  : {mom_accel_score:.1f}/25 pts"
+            )
 
             # Détails accélération si disponibles
             accel_details = momentum_result.get("acceleration_details", {})
             if accel_details:
-                self.logger.info(f"   │  • Move total      : {accel_details.get('total_move_pct', 0)*100:.2f}%")
-                self.logger.info(f"   │  • Accel ratio     : {accel_details.get('acceleration_ratio', 1.0):.2f}x")
+                self.logger.info(
+                    f"   │  • Move total      : {accel_details.get('total_move_pct', 0)*100:.2f}%"
+                )
+                self.logger.info(
+                    f"   │  • Accel ratio     : {accel_details.get('acceleration_ratio', 1.0):.2f}x"
+                )
 
             self.logger.info(f"   └─ MTF Alignment       : {mom_mtf_score:.1f}/20 pts")
 
             # Détails MTF si disponibles (BURST SCALPING M1+M3+M5)
             mtf_details = momentum_result.get("mtf_details", {})
             if mtf_details:
-                self.logger.info(f"      • M1 direction   : {mtf_details.get('m1_direction', 'N/A')}")
-                self.logger.info(f"      • M3 direction   : {mtf_details.get('m3_direction', 'N/A')}")
-                self.logger.info(f"      • M5 direction   : {mtf_details.get('m5_direction', 'N/A')}")
-                self.logger.info(f"      • Alignment      : {mtf_details.get('alignment', 'N/A')}")
+                self.logger.info(
+                    f"      • M1 direction   : {mtf_details.get('m1_direction', 'N/A')}"
+                )
+                self.logger.info(
+                    f"      • M3 direction   : {mtf_details.get('m3_direction', 'N/A')}"
+                )
+                self.logger.info(
+                    f"      • M5 direction   : {mtf_details.get('m5_direction', 'N/A')}"
+                )
+                self.logger.info(
+                    f"      • Alignment      : {mtf_details.get('alignment', 'N/A')}"
+                )
 
             # 4.5 VWAP MODULE - INSTITUTIONNEL
             self.logger.info(f"\n📊 VWAP INSTITUTIONNEL ({w_vw:.0f}% du scoring)")
@@ -1979,7 +2223,9 @@ class ScalpingStrategy(BaseStrategy):
                 f"   VWAP ({w_vw:.0f}%)      : {vwap_score_norm:.1f}/{w_vw:.0f} pts"
             )
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL (OF+FP+MOM+VWAP) : {total_normalise:.1f}/100 pts")
+            self.logger.info(
+                f"   TOTAL (OF+FP+MOM+VWAP) : {total_normalise:.1f}/100 pts"
+            )
 
             # Ancien total (pour référence debug - à supprimer après validation)
             ancien_total_erroné = final_score + vwap_score_norm
@@ -2066,14 +2312,20 @@ class ScalpingStrategy(BaseStrategy):
             if df_m3_momentum is None and self.mt5_connector:
                 try:
                     import MetaTrader5 as mt5
-                    df_m3_momentum = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M3, count=20)
+
+                    df_m3_momentum = self.mt5_connector.get_rates(
+                        asset, mt5.TIMEFRAME_M3, count=20
+                    )
                 except Exception:
                     pass
 
             if df_m5_momentum is None and self.mt5_connector:
                 try:
                     import MetaTrader5 as mt5
-                    df_m5_momentum = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=15)
+
+                    df_m5_momentum = self.mt5_connector.get_rates(
+                        asset, mt5.TIMEFRAME_M5, count=15
+                    )
                 except Exception:
                     pass
 
@@ -2082,8 +2334,10 @@ class ScalpingStrategy(BaseStrategy):
             momentum_analysis = {}
 
             if df_work is not None and len(df_work) >= 12:
-                momentum_analysis = self._calculate_institutional_momentum(df_work, df_m3_momentum, df_m5_momentum)
-                momentum_m1 = momentum_analysis.get('primary_direction', 'NEUTRAL')
+                momentum_analysis = self._calculate_institutional_momentum(
+                    df_work, df_m3_momentum, df_m5_momentum
+                )
+                momentum_m1 = momentum_analysis.get("primary_direction", "NEUTRAL")
 
                 # 06 JAN 2026: FORCE INFO pour diagnostiquer régime global
                 self.logger.info(
@@ -2103,11 +2357,15 @@ class ScalpingStrategy(BaseStrategy):
                 analyzed_context["context"] = {}
 
             analyzed_context["momentum_m1"] = momentum_m1
-            analyzed_context["momentum_analysis"] = momentum_analysis  # Ajout analyse complète
+            analyzed_context["momentum_analysis"] = (
+                momentum_analysis  # Ajout analyse complète
+            )
 
             # ✅ AJOUTER aussi dans asset_signals pour usage immédiat
             asset_signals["momentum_m1"] = momentum_m1
-            asset_signals["momentum_analysis"] = momentum_analysis  # Ajout analyse complète
+            asset_signals["momentum_analysis"] = (
+                momentum_analysis  # Ajout analyse complète
+            )
 
             # --- 0b) Action hint (BUY/SELL) par défaut ---
             action = None
@@ -2161,67 +2419,85 @@ class ScalpingStrategy(BaseStrategy):
 
                 # ✅ BOOST DE CONFIANCE MOMENTUM INSTITUTIONNEL (23 DEC 2025)
                 momentum_analysis = asset_signals.get("momentum_analysis", {})
-                entry_quality = momentum_analysis.get('entry_quality', 'POOR')
-                primary_direction = momentum_analysis.get('primary_direction', 'NEUTRAL')
+                entry_quality = momentum_analysis.get("entry_quality", "POOR")
+                primary_direction = momentum_analysis.get(
+                    "primary_direction", "NEUTRAL"
+                )
                 phase = str(asset_signals.get("phase", "")).lower()
 
                 # Boost confiance selon qualité d'entrée et cohérence direction
-                if entry_quality == 'EXCELLENT':
-                    if (primary_direction == 'BULLISH' and ('bull' in phase or 'up' in phase or 'accum' in phase)):
+                if entry_quality == "EXCELLENT":
+                    if primary_direction == "BULLISH" and (
+                        "bull" in phase or "up" in phase or "accum" in phase
+                    ):
                         asset_signals["confidence_score"] = min(
-                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.20
+                            1.0,
+                            float(asset_signals.get("confidence_score", 0.5)) + 0.20,
                         )
                         self.logger.info(
                             f"[{asset}] 🏦 Momentum EXCELLENT BULLISH → confiance ++20%"
                         )
-                    elif (primary_direction == 'BEARISH' and ('bear' in phase or 'down' in phase or 'distrib' in phase)):
+                    elif primary_direction == "BEARISH" and (
+                        "bear" in phase or "down" in phase or "distrib" in phase
+                    ):
                         asset_signals["confidence_score"] = min(
-                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.20
+                            1.0,
+                            float(asset_signals.get("confidence_score", 0.5)) + 0.20,
                         )
                         self.logger.info(
                             f"[{asset}] 🏦 Momentum EXCELLENT BEARISH → confiance ++20%"
                         )
 
-                elif entry_quality == 'GOOD':
-                    if (primary_direction == 'BULLISH' and ('bull' in phase or 'up' in phase)):
+                elif entry_quality == "GOOD":
+                    if primary_direction == "BULLISH" and (
+                        "bull" in phase or "up" in phase
+                    ):
                         asset_signals["confidence_score"] = min(
-                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.12
+                            1.0,
+                            float(asset_signals.get("confidence_score", 0.5)) + 0.12,
                         )
                         self.logger.info(
                             f"[{asset}] 🏦 Momentum GOOD BULLISH → confiance ++12%"
                         )
-                    elif (primary_direction == 'BEARISH' and ('bear' in phase or 'down' in phase)):
+                    elif primary_direction == "BEARISH" and (
+                        "bear" in phase or "down" in phase
+                    ):
                         asset_signals["confidence_score"] = min(
-                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.12
+                            1.0,
+                            float(asset_signals.get("confidence_score", 0.5)) + 0.12,
                         )
                         self.logger.info(
                             f"[{asset}] 🏦 Momentum GOOD BEARISH → confiance ++12%"
                         )
 
-                elif entry_quality == 'FAIR':
-                    if primary_direction == 'BULLISH' and ('bull' in phase or 'up' in phase):
+                elif entry_quality == "FAIR":
+                    if primary_direction == "BULLISH" and (
+                        "bull" in phase or "up" in phase
+                    ):
                         asset_signals["confidence_score"] = min(
-                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.05
+                            1.0,
+                            float(asset_signals.get("confidence_score", 0.5)) + 0.05,
                         )
                         self.logger.info(
                             f"[{asset}] 🏦 Momentum FAIR BULLISH → confiance +5%"
                         )
-                    elif primary_direction == 'BEARISH' and ('bear' in phase or 'down' in phase):
+                    elif primary_direction == "BEARISH" and (
+                        "bear" in phase or "down" in phase
+                    ):
                         asset_signals["confidence_score"] = min(
-                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.05
+                            1.0,
+                            float(asset_signals.get("confidence_score", 0.5)) + 0.05,
                         )
                         self.logger.info(
                             f"[{asset}] 🏦 Momentum FAIR BEARISH → confiance +5%"
                         )
 
-                elif entry_quality == 'POOR':
+                elif entry_quality == "POOR":
                     # POOR momentum = pénalité de confiance
                     asset_signals["confidence_score"] = max(
                         0.0, float(asset_signals.get("confidence_score", 0.5)) - 0.15
                     )
-                    self.logger.warning(
-                        f"[{asset}] ⚠️ Momentum POOR → confiance -15%"
-                    )
+                    self.logger.warning(f"[{asset}] ⚠️ Momentum POOR → confiance -15%")
 
                 # Early entry si déséquilibre extrême (optionnel)
                 try:
@@ -2263,10 +2539,14 @@ class ScalpingStrategy(BaseStrategy):
                         d = float(fp_summary.get("delta_total", 0))
                         if d > 0:
                             action = "BUY"
-                            self.logger.info(f"[{asset}] 🟢 Action=BUY (delta={d:.0f} > 0)")
+                            self.logger.info(
+                                f"[{asset}] 🟢 Action=BUY (delta={d:.0f} > 0)"
+                            )
                         elif d < 0:
                             action = "SELL"
-                            self.logger.info(f"[{asset}] 🔴 Action=SELL (delta={d:.0f} < 0)")
+                            self.logger.info(
+                                f"[{asset}] 🔴 Action=SELL (delta={d:.0f} < 0)"
+                            )
                 except Exception:
                     pass
 
@@ -2281,12 +2561,21 @@ class ScalpingStrategy(BaseStrategy):
                 if action in ("BUY", "SELL"):
                     try:
                         asset_cfg = self.config_manager.load_asset_config(asset) or {}
-                        mom_cfg = asset_cfg.get("overrides", {}).get("scalping", {}).get("orderflow_v6", {}).get("momentum_filter", {})
+                        mom_cfg = (
+                            asset_cfg.get("overrides", {})
+                            .get("scalping", {})
+                            .get("orderflow_v6", {})
+                            .get("momentum_filter", {})
+                        )
                         if mom_cfg.get("enabled", False):
                             # 1) RÉGIME GLOBAL (primary_direction depuis momentum institutionnel)
-                            primary_dir = momentum_analysis.get('primary_direction', 'NEUTRAL')
-                            mom_score = momentum_analysis.get('momentum_score', 0)
-                            mom_quality = momentum_analysis.get('momentum_quality', 'WEAK')
+                            primary_dir = momentum_analysis.get(
+                                "primary_direction", "NEUTRAL"
+                            )
+                            mom_score = momentum_analysis.get("momentum_score", 0)
+                            mom_quality = momentum_analysis.get(
+                                "momentum_quality", "WEAK"
+                            )
 
                             # 2) MOMENTUM COURT TERME (3 bougies)
                             lookback = int(mom_cfg.get("lookback_bars", 3))
@@ -2661,7 +2950,6 @@ class ScalpingStrategy(BaseStrategy):
                     asset=asset, df_m1=df_work, asset_signals=asset_signals
                 )
 
-
                 # ✅ PRÉPARATION DU CONTEXTE POUR FUSIONMANAGER (18 DEC 2025)
                 # Créer un dictionnaire context avec TOUS les éléments nécessaires
                 fusion_context = {
@@ -2801,19 +3089,26 @@ class ScalpingStrategy(BaseStrategy):
             entry_quality_veto_cfg = veto_cfg.get("entry_quality_veto", {})
             entry_quality_veto_enabled = entry_quality_veto_cfg.get("enabled", True)
             block_poor_quality = entry_quality_veto_cfg.get("block_poor_quality", True)
-            poor_score_threshold = entry_quality_veto_cfg.get("poor_score_threshold", 30.0)
-            poor_confidence_threshold = entry_quality_veto_cfg.get("poor_confidence_threshold", 0.4)
+            poor_score_threshold = entry_quality_veto_cfg.get(
+                "poor_score_threshold", 30.0
+            )
+            poor_confidence_threshold = entry_quality_veto_cfg.get(
+                "poor_confidence_threshold", 0.4
+            )
 
             momentum_analysis = asset_signals.get("momentum_analysis", {})
-            entry_quality = momentum_analysis.get('entry_quality', 'POOR')
-            momentum_score = momentum_analysis.get('momentum_score', 0)
-            momentum_confidence = momentum_analysis.get('confidence', 0)
+            entry_quality = momentum_analysis.get("entry_quality", "POOR")
+            momentum_score = momentum_analysis.get("momentum_score", 0)
+            momentum_confidence = momentum_analysis.get("confidence", 0)
 
             # VETO si enabled ET momentum POOR ET score très faible ET confiance faible
-            if (entry_quality_veto_enabled and block_poor_quality and
-                entry_quality == 'POOR' and
-                momentum_score < poor_score_threshold and
-                momentum_confidence < poor_confidence_threshold):
+            if (
+                entry_quality_veto_enabled
+                and block_poor_quality
+                and entry_quality == "POOR"
+                and momentum_score < poor_score_threshold
+                and momentum_confidence < poor_confidence_threshold
+            ):
 
                 self.logger.warning(
                     f"[{asset}] ❌ VETO ENTRY_QUALITY | Quality={entry_quality} | "
@@ -2824,7 +3119,7 @@ class ScalpingStrategy(BaseStrategy):
                 return {}
 
             # AVERTISSEMENT si momentum POOR mais conditions limites acceptables
-            elif entry_quality == 'POOR':
+            elif entry_quality == "POOR":
                 self.logger.warning(
                     f"[{asset}] ⚠️ WARNING | Momentum POOR mais setup accepté | "
                     f"Score={momentum_score:.1f} | Confidence={momentum_confidence:.2f}"
@@ -2860,72 +3155,18 @@ class ScalpingStrategy(BaseStrategy):
         best = None
         best_score = -1.0
         for c in candidates:
-            s = self._score_candidate(c, meta, asset_signals, analyzed_context, weights)
+            # Utilise calculate_unified_score (centralisé dans advanced_scoring.py)
+            result = calculate_unified_score(
+                candidate=c,
+                meta=meta,
+                asset_signals=asset_signals,
+                weights=weights
+            )
+            s = result.get('normalized_score', 0.5)
             c["score"] = float(max(0.0, min(1.0, s)))
             if c["score"] > best_score:
                 best, best_score = c, c["score"]
         return best
-
-    def _score_candidate(
-        self,
-        c: Dict[str, Any],
-        meta: Dict[str, Any],
-        asset_signals: Dict[str, Any],
-        analyzed_context: Dict[str, Any],
-        weights: Dict[str, float],
-    ) -> float:
-        # --- 1) Contexte (phase/MTF & confiance globale signaux) ---
-        phase = str(asset_signals.get("phase", "") or "").lower()
-        conf = float(asset_signals.get("confidence_score", 0.5) or 0.5)
-        align = 0.5
-        if c.get("action") == "BUY" and any(
-            k in phase for k in ("bull", "up", "accum", "trend")
-        ):
-            align = 1.0
-        if c.get("action") == "SELL" and any(
-            k in phase for k in ("bear", "down", "distrib", "trend")
-        ):
-            align = 1.0 if "trend" in phase or "bear" in phase else 0.8
-        context_score = 0.5 * conf + 0.5 * align
-        context_score = max(0.0, min(1.0, context_score))
-
-        # --- 2) Technique (score interne du setup) ---
-        tech = c.get("technical_score")
-        if tech is None:
-            tech = c.get("confidence", 0.6)
-        technical_score = max(0.0, min(1.0, float(tech)))
-
-        # --- 3) Order Flow (footprint/delta si dispo) ---
-        of = 0.0
-        try:
-            fp = float(asset_signals.get("footprint_score", 0.0) or 0.0) / 100.0
-            of = max(of, fp)
-            d = (asset_signals.get("footprint_summary") or {}).get("delta_total")
-            if isinstance(d, (int, float)):
-                of = max(of, min(abs(d) / 500.0, 1.0) * 0.7)  # plafonné
-        except Exception:
-            pass
-        orderflow_score = max(0.0, min(1.0, of))
-
-        # --- 4) Risque (spread bas = mieux ; heuristique simple) ---
-        sp = float(meta.get("spread_pips", 0.0) or 0.0)
-        if sp <= 5:
-            risk_score = 1.0
-        elif sp <= 10:
-            risk_score = 0.8
-        elif sp <= 15:
-            risk_score = 0.6
-        else:
-            risk_score = 0.3
-
-        w = lambda k, d: float(weights.get(k, d))
-        score = (
-            w("context", 0.3) * context_score
-            + w("technical", 0.4) * technical_score
-            + w("orderflow", 0.2) * orderflow_score
-            + w("risk", 0.1) * risk_score
-        )
-        return float(score)
 
     # === [PATTERNS MOMENTUM SUPPRIMÉS - Session 23 Nov 2025] ===
     # Les fonctions suivantes ont été supprimées car désactivées dans la config :
@@ -3104,52 +3345,6 @@ class ScalpingStrategy(BaseStrategy):
             return False
 
         return True
-
-    def _rule_liquidity_sweep(
-        self,
-        df: pd.DataFrame,
-        meta: Dict[str, Any],
-        lookback: int = 20,
-    ) -> Optional[str]:
-        """
-        Détecte un sweep simple des HH/LL sur 'lookback' barres.
-        Contrarian:
-        - SELL si le close casse le plus haut récent (sweep au-dessus)
-        - BUY  si le close casse le plus bas récent (sweep en-dessous)
-        Retourne "BUY" / "SELL" / None.
-        """
-        try:
-            if df is None or lookback is None or int(lookback) < 2:
-                return None
-            if len(df) < int(lookback):
-                return None
-
-            recent = df.iloc[-int(lookback) :]
-
-            # Cast robustes
-            hi = pd.to_numeric(recent["high"], errors="coerce")
-            lo = pd.to_numeric(recent["low"], errors="coerce")
-            cl = pd.to_numeric(df["close"].iloc[-1], errors="coerce")
-
-            hh = float(hi.max()) if np.isfinite(hi.max()) else float("nan")
-            ll = float(lo.min()) if np.isfinite(lo.min()) else float("nan")
-            close = float(cl) if np.isfinite(cl) else float("nan")
-
-            if not (np.isfinite(hh) and np.isfinite(ll) and np.isfinite(close)):
-                return None
-
-            # Heuristique sweep (contrarian)
-            if close >= hh:
-                return "SELL"
-            if close <= ll:
-                return "BUY"
-            return None
-        except Exception:
-            return None
-
-    # === [PATTERN MARUBOZU SUPPRIMÉ - Session 23 Nov 2025] ===
-    # Fonction _rule_marubozu_range supprimée (215 lignes)
-    # Raison : Pattern de bougie jamais utilisé, code mort
 
     def _rule_range_accumulation(
         self,
@@ -3388,11 +3583,16 @@ class ScalpingStrategy(BaseStrategy):
             return v * 100.0 if v <= 1.0 else v
         return 0.0
 
-    def _calculate_institutional_momentum(self, df_m1: pd.DataFrame, df_m3: pd.DataFrame = None, df_m5: pd.DataFrame = None) -> dict:
+    def _calculate_institutional_momentum(
+        self,
+        df_m1: pd.DataFrame,
+        df_m3: pd.DataFrame = None,
+        df_m5: pd.DataFrame = None,
+    ) -> dict:
         """
         🏦 ANALYSE MOMENTUM INSTITUTIONNELLE AVANCÉE - V2.0
         Calcule le momentum multi-dimensionnel pour trading professionnel
-        
+
         Returns:
             dict: {
                 'primary_direction': 'BULLISH'|'BEARISH'|'NEUTRAL',
@@ -3409,98 +3609,99 @@ class ScalpingStrategy(BaseStrategy):
                 'entry_quality': 'POOR'|'FAIR'|'GOOD'|'EXCELLENT'
             }
         """
-        
+
         if df_m1 is None or len(df_m1) < 12:
             return self._get_neutral_momentum_response()
-        
+
         try:
             # ===================================================================
             # 1. PRICE ACTION ANALYSIS (35% du score)
             # ===================================================================
             pa_score, pa_breakdown = self._analyze_price_action(df_m1.tail(12))
-            
+
             # ===================================================================
             # 2. VOLUME PROFILE ANALYSIS (25% du score)
             # ===================================================================
             vp_score, vp_breakdown = self._analyze_volume_profile(df_m1.tail(12))
-            
+
             # ===================================================================
             # 3. PRICE VELOCITY & ACCELERATION (20% du score)
             # ===================================================================
             va_score, va_breakdown = self._analyze_velocity_acceleration(df_m1.tail(8))
-            
+
             # ===================================================================
             # 4. MULTI-TIMEFRAME STRUCTURE (20% du score)
             # ===================================================================
             mtf_score, mtf_breakdown = self._analyze_multi_timeframe_structure(
                 df_m1, df_m3, df_m5
             )
-            
+
             # ===================================================================
             # 5. CALCUL DU SCORE GLOBAL ET DIRECTION
             # ===================================================================
             weights = {
-                'price_action': 0.35,
-                'volume': 0.25,
-                'velocity': 0.20,
-                'structure': 0.20
+                "price_action": 0.35,
+                "volume": 0.25,
+                "velocity": 0.20,
+                "structure": 0.20,
             }
-            
+
             total_score = (
-                pa_score * weights['price_action'] +
-                vp_score * weights['volume'] +
-                va_score * weights['velocity'] +
-                mtf_score * weights['structure']
+                pa_score * weights["price_action"]
+                + vp_score * weights["volume"]
+                + va_score * weights["velocity"]
+                + mtf_score * weights["structure"]
             )
-            
+
             # ===================================================================
             # 6. DÉTERMINATION DE LA DIRECTION ET QUALITÉ
             # ===================================================================
             direction, quality, confidence = self._determine_direction_and_quality(
                 pa_breakdown, va_breakdown, total_score
             )
-            
+
             # ===================================================================
             # 7. DÉTECTION DU BIAS INSTITUTIONNEL
             # ===================================================================
             institutional_bias = self._detect_institutional_bias(
                 pa_breakdown, vp_breakdown, mtf_breakdown
             )
-            
+
             # ===================================================================
             # 8. QUALITÉ D'ENTRÉE POUR SCALPING
             # ===================================================================
             entry_quality = self._assess_entry_quality(
                 pa_breakdown, vp_breakdown, va_breakdown, total_score
             )
-            
+
             # ===================================================================
             # 9. CONSTRUCTION DE LA RÉPONSE
             # ===================================================================
             response = {
-                'primary_direction': direction,
-                'momentum_score': round(total_score, 1),
-                'momentum_quality': quality,
-                'confidence': round(confidence, 3),
-                'institutional_bias': institutional_bias,
-                'entry_quality': entry_quality,
-                'breakdown': {
-                    'price_action': pa_breakdown,
-                    'volume_profile': vp_breakdown,
-                    'velocity_metrics': va_breakdown,
-                    'structure_analysis': mtf_breakdown
+                "primary_direction": direction,
+                "momentum_score": round(total_score, 1),
+                "momentum_quality": quality,
+                "confidence": round(confidence, 3),
+                "institutional_bias": institutional_bias,
+                "entry_quality": entry_quality,
+                "breakdown": {
+                    "price_action": pa_breakdown,
+                    "volume_profile": vp_breakdown,
+                    "velocity_metrics": va_breakdown,
+                    "structure_analysis": mtf_breakdown,
                 },
-                'timestamp': pd.Timestamp.now().isoformat(),
-                'version': 'Institutional Momentum Analyzer v2.0'
+                "timestamp": pd.Timestamp.now().isoformat(),
+                "version": "Institutional Momentum Analyzer v2.0",
             }
-            
+
             self._log_momentum_analysis(response)
             return response
-            
-        except Exception as e:
-            self.logger.error(f"[INSTITUTIONAL_MOMENTUM] Error: {str(e)}", exc_info=True)
-            return self._get_neutral_momentum_response()
 
+        except Exception as e:
+            self.logger.error(
+                f"[INSTITUTIONAL_MOMENTUM] Error: {str(e)}", exc_info=True
+            )
+            return self._get_neutral_momentum_response()
 
     def _analyze_price_action(self, df: pd.DataFrame) -> tuple:
         """
@@ -3508,370 +3709,368 @@ class ScalpingStrategy(BaseStrategy):
         """
         if len(df) < 8:
             return 0, {}
-        
+
         # 1. Bougie Pattern Recognition
         patterns = self._detect_candle_patterns(df.tail(8))
-        
+
         # 2. Body Ratio Analysis (force des bougies)
         body_ratios = []
         for i in range(len(df)):
-            high_low = df.iloc[i]['high'] - df.iloc[i]['low']
+            high_low = df.iloc[i]["high"] - df.iloc[i]["low"]
             if high_low > 0:
-                body_size = abs(df.iloc[i]['close'] - df.iloc[i]['open'])
+                body_size = abs(df.iloc[i]["close"] - df.iloc[i]["open"])
                 body_ratios.append(body_size / high_low)
-        
+
         avg_body_ratio = np.mean(body_ratios) if body_ratios else 0
-        
+
         # 3. Wicks Analysis (rejets)
         upper_wicks, lower_wicks = [], []
         for i in range(len(df)):
             candle = df.iloc[i]
-            if candle['high'] - max(candle['open'], candle['close']) > 0:
-                upper_wicks.append(candle['high'] - max(candle['open'], candle['close']))
-            if min(candle['open'], candle['close']) - candle['low'] > 0:
-                lower_wicks.append(min(candle['open'], candle['close']) - candle['low'])
-        
+            if candle["high"] - max(candle["open"], candle["close"]) > 0:
+                upper_wicks.append(
+                    candle["high"] - max(candle["open"], candle["close"])
+                )
+            if min(candle["open"], candle["close"]) - candle["low"] > 0:
+                lower_wicks.append(min(candle["open"], candle["close"]) - candle["low"])
+
         # 4. Sequential Analysis
         green_sequence = self._calculate_green_sequence(df)
-        close_sequence = self._calculate_close_sequence(df['close'].values)
-        
+        close_sequence = self._calculate_close_sequence(df["close"].values)
+
         # 5. Score Calculation
         score_components = {
-            'pattern_strength': patterns.get('pattern_score', 0),
-            'body_ratio': min(100, avg_body_ratio * 200),  # Normalisé 0-100
-            'wick_balance': self._calculate_wick_balance(upper_wicks, lower_wicks),
-            'sequence_momentum': green_sequence['score'],
-            'close_trend': close_sequence['score']
+            "pattern_strength": patterns.get("pattern_score", 0),
+            "body_ratio": min(100, avg_body_ratio * 200),  # Normalisé 0-100
+            "wick_balance": self._calculate_wick_balance(upper_wicks, lower_wicks),
+            "sequence_momentum": green_sequence["score"],
+            "close_trend": close_sequence["score"],
         }
-        
-        total_score = np.mean(list(score_components.values()))
-        
-        breakdown = {
-            'patterns_detected': patterns.get('patterns', []),
-            'avg_body_ratio': round(avg_body_ratio, 3),
-            'body_ratio_class': self._classify_body_ratio(avg_body_ratio),
-            'upper_wick_avg': round(np.mean(upper_wicks) if upper_wicks else 0, 4),
-            'lower_wick_avg': round(np.mean(lower_wicks) if lower_wicks else 0, 4),
-            'green_streak': green_sequence['streak'],
-            'close_slope': round(close_sequence['slope'], 6),
-            'components': score_components
-        }
-        
-        return total_score, breakdown
 
+        total_score = np.mean(list(score_components.values()))
+
+        breakdown = {
+            "patterns_detected": patterns.get("patterns", []),
+            "avg_body_ratio": round(avg_body_ratio, 3),
+            "body_ratio_class": self._classify_body_ratio(avg_body_ratio),
+            "upper_wick_avg": round(np.mean(upper_wicks) if upper_wicks else 0, 4),
+            "lower_wick_avg": round(np.mean(lower_wicks) if lower_wicks else 0, 4),
+            "green_streak": green_sequence["streak"],
+            "close_slope": round(close_sequence["slope"], 6),
+            "components": score_components,
+        }
+
+        return total_score, breakdown
 
     def _analyze_volume_profile(self, df: pd.DataFrame) -> tuple:
         """
         Analyse du profil de volume (si disponible)
         """
         # Si pas de volume dans les données, on utilise des approximations
-        if 'volume' not in df.columns:
+        if "volume" not in df.columns:
             # Approximation: volume ~ body size * range
             df = df.copy()
-            df['volume'] = (abs(df['close'] - df['open']) * (df['high'] - df['low']))
-        
-        recent_volume = df['volume'].tail(8)
+            df["volume"] = abs(df["close"] - df["open"]) * (df["high"] - df["low"])
+
+        recent_volume = df["volume"].tail(8)
         avg_volume = recent_volume.mean()
-        
+
         if avg_volume == 0:
-            return 50, {'status': 'NO_VOLUME_DATA'}
-        
+            return 50, {"status": "NO_VOLUME_DATA"}
+
         # 1. Volume Trend
         volume_trend = self._calculate_volume_trend(recent_volume)
-        
+
         # 2. Volume Spikes Detection
         spikes = self._detect_volume_spikes(recent_volume, avg_volume)
-        
+
         # 3. Volume-Price Correlation
         vp_correlation = self._calculate_volume_price_correlation(
-            df['close'].tail(8).values,
-            recent_volume.values
+            df["close"].tail(8).values, recent_volume.values
         )
-        
+
         # 4. Score Calculation
         score_components = {
-            'volume_trend': volume_trend['score'],
-            'spike_quality': spikes['score'],
-            'vp_correlation': vp_correlation['score']
+            "volume_trend": volume_trend["score"],
+            "spike_quality": spikes["score"],
+            "vp_correlation": vp_correlation["score"],
         }
-        
-        total_score = np.mean(list(score_components.values()))
-        
-        breakdown = {
-            'volume_avg': round(avg_volume, 2),
-            'volume_trend_direction': volume_trend['direction'],
-            'volume_acceleration': round(volume_trend['acceleration'], 3),
-            'spikes_detected': spikes['count'],
-            'last_spike_ratio': round(spikes['last_ratio'], 2),
-            'vp_correlation_strength': vp_correlation['strength'],
-            'vp_alignment': vp_correlation['alignment'],
-            'components': score_components
-        }
-        
-        return total_score, breakdown
 
+        total_score = np.mean(list(score_components.values()))
+
+        breakdown = {
+            "volume_avg": round(avg_volume, 2),
+            "volume_trend_direction": volume_trend["direction"],
+            "volume_acceleration": round(volume_trend["acceleration"], 3),
+            "spikes_detected": spikes["count"],
+            "last_spike_ratio": round(spikes["last_ratio"], 2),
+            "vp_correlation_strength": vp_correlation["strength"],
+            "vp_alignment": vp_correlation["alignment"],
+            "components": score_components,
+        }
+
+        return total_score, breakdown
 
     def _analyze_velocity_acceleration(self, df: pd.DataFrame) -> tuple:
         """
         Analyse de la vélocité et accélération des prix
         """
         if len(df) < 6:
-            return 50, {'status': 'INSUFFICIENT_DATA'}
-        
-        closes = df['close'].values
-        
+            return 50, {"status": "INSUFFICIENT_DATA"}
+
+        closes = df["close"].values
+
         # 1. Velocity (vitesse instantanée)
         velocity = np.diff(closes)
         avg_velocity = np.mean(velocity) if len(velocity) > 0 else 0
-        
+
         # 2. Acceleration (dérivée seconde)
         if len(velocity) > 1:
             acceleration = np.diff(velocity)
             avg_acceleration = np.mean(acceleration)
         else:
             avg_acceleration = 0
-        
+
         # 3. Jerk (dérivée troisième - changement d'accélération)
         if len(velocity) > 2:
             jerk = np.diff(acceleration) if len(acceleration) > 1 else 0
             avg_jerk = np.mean(jerk) if len(jerk) > 0 else 0
         else:
             avg_jerk = 0
-        
+
         # 4. Normalisation par ATR
         atr = self._atr(df, period=14)
         if pd.isna(atr) or atr == 0:
             norm_factor = 1
         else:
             norm_factor = atr
-        
+
         # 5. Score Calculation
         velocity_score = self._normalize_velocity_score(avg_velocity, norm_factor)
-        acceleration_score = self._normalize_acceleration_score(avg_acceleration, norm_factor)
+        acceleration_score = self._normalize_acceleration_score(
+            avg_acceleration, norm_factor
+        )
         jerk_score = self._normalize_jerk_score(avg_jerk, norm_factor)
-        
-        total_score = (velocity_score * 0.5 + 
-                    acceleration_score * 0.3 + 
-                    jerk_score * 0.2)
-        
-        breakdown = {
-            'velocity_pips': round(avg_velocity * 10000, 2),  # Convertir en pips
-            'acceleration_pips': round(avg_acceleration * 10000, 2),
-            'jerk_pips': round(avg_jerk * 10000, 2),
-            'velocity_class': self._classify_velocity(avg_velocity, norm_factor),
-            'acceleration_class': self._classify_acceleration(avg_acceleration),
-            'trend_stability': self._assess_trend_stability(velocity, acceleration),
-            'atr_reference': round(atr * 10000, 2) if not pd.isna(atr) else 0,
-            'components': {
-                'velocity': round(velocity_score, 1),
-                'acceleration': round(acceleration_score, 1),
-                'jerk': round(jerk_score, 1)
-            }
-        }
-        
-        return total_score, breakdown
 
+        total_score = velocity_score * 0.5 + acceleration_score * 0.3 + jerk_score * 0.2
+
+        breakdown = {
+            "velocity_pips": round(avg_velocity * 10000, 2),  # Convertir en pips
+            "acceleration_pips": round(avg_acceleration * 10000, 2),
+            "jerk_pips": round(avg_jerk * 10000, 2),
+            "velocity_class": self._classify_velocity(avg_velocity, norm_factor),
+            "acceleration_class": self._classify_acceleration(avg_acceleration),
+            "trend_stability": self._assess_trend_stability(velocity, acceleration),
+            "atr_reference": round(atr * 10000, 2) if not pd.isna(atr) else 0,
+            "components": {
+                "velocity": round(velocity_score, 1),
+                "acceleration": round(acceleration_score, 1),
+                "jerk": round(jerk_score, 1),
+            },
+        }
+
+        return total_score, breakdown
 
     def _analyze_multi_timeframe_structure(self, df_m1, df_m3, df_m5) -> tuple:
         """
         Analyse structurelle multi-timeframe
         """
         # 1. M1 Structure Analysis
-        m1_structure = self._analyze_single_timeframe_structure(df_m1, 'M1')
-        
+        m1_structure = self._analyze_single_timeframe_structure(df_m1, "M1")
+
         # 2. M3 Structure Analysis (si disponible)
         m3_structure = {}
         if df_m3 is not None and len(df_m3) >= 6:
-            m3_structure = self._analyze_single_timeframe_structure(df_m3.tail(6), 'M3')
-        
+            m3_structure = self._analyze_single_timeframe_structure(df_m3.tail(6), "M3")
+
         # 3. M5 Structure Analysis (si disponible)
         m5_structure = {}
         if df_m5 is not None and len(df_m5) >= 4:
-            m5_structure = self._analyze_single_timeframe_structure(df_m5.tail(4), 'M5')
-        
+            m5_structure = self._analyze_single_timeframe_structure(df_m5.tail(4), "M5")
+
         # 4. MTF Alignment Analysis
-        alignment = self._analyze_mtf_alignment(m1_structure, m3_structure, m5_structure)
-        
+        alignment = self._analyze_mtf_alignment(
+            m1_structure, m3_structure, m5_structure
+        )
+
         # 5. Score Calculation
         scores = []
         if m1_structure:
-            scores.append(m1_structure.get('score', 50))
+            scores.append(m1_structure.get("score", 50))
         if m3_structure:
-            scores.append(m3_structure.get('score', 50) * 0.7)  # Moins de poids
+            scores.append(m3_structure.get("score", 50) * 0.7)  # Moins de poids
         if m5_structure:
-            scores.append(m5_structure.get('score', 50) * 0.5)  # Encore moins de poids
-        
+            scores.append(m5_structure.get("score", 50) * 0.5)  # Encore moins de poids
+
         total_score = np.mean(scores) if scores else 50
-        
+
         breakdown = {
-            'm1_structure': m1_structure,
-            'm3_structure': m3_structure,
-            'm5_structure': m5_structure,
-            'mtf_alignment': alignment,
-            'alignment_score': alignment.get('score', 0),
-            'alignment_quality': alignment.get('quality', 'NEUTRAL')
+            "m1_structure": m1_structure,
+            "m3_structure": m3_structure,
+            "m5_structure": m5_structure,
+            "mtf_alignment": alignment,
+            "alignment_score": alignment.get("score", 0),
+            "alignment_quality": alignment.get("quality", "NEUTRAL"),
         }
-        
+
         return total_score, breakdown
 
-
-    def _determine_direction_and_quality(self, pa_breakdown, va_breakdown, total_score) -> tuple:
+    def _determine_direction_and_quality(
+        self, pa_breakdown, va_breakdown, total_score
+    ) -> tuple:
         """
         Détermine la direction et la qualité du momentum
         """
         # 1. Direction basée sur plusieurs facteurs
         direction_indicators = []
-        
+
         # Price Action direction
-        if 'patterns_detected' in pa_breakdown:
-            patterns = pa_breakdown['patterns_detected']
-            bullish_patterns = sum(1 for p in patterns if p['bias'] == 'BULLISH')
-            bearish_patterns = sum(1 for p in patterns if p['bias'] == 'BEARISH')
+        if "patterns_detected" in pa_breakdown:
+            patterns = pa_breakdown["patterns_detected"]
+            bullish_patterns = sum(1 for p in patterns if p["bias"] == "BULLISH")
+            bearish_patterns = sum(1 for p in patterns if p["bias"] == "BEARISH")
             if bullish_patterns > bearish_patterns:
-                direction_indicators.append('BULLISH')
+                direction_indicators.append("BULLISH")
             elif bearish_patterns > bullish_patterns:
-                direction_indicators.append('BEARISH')
-        
+                direction_indicators.append("BEARISH")
+
         # Velocity direction
-        velocity_pips = va_breakdown.get('velocity_pips', 0)
+        velocity_pips = va_breakdown.get("velocity_pips", 0)
         if velocity_pips > 2:
-            direction_indicators.append('BULLISH')
+            direction_indicators.append("BULLISH")
         elif velocity_pips < -2:
-            direction_indicators.append('BEARISH')
-        
+            direction_indicators.append("BEARISH")
+
         # Détermination finale
         if not direction_indicators:
-            direction = 'NEUTRAL'
+            direction = "NEUTRAL"
         else:
             direction = max(set(direction_indicators), key=direction_indicators.count)
-        
+
         # 2. Quality basée sur le score et la cohérence
         if total_score >= 80:
-            quality = 'VERY_STRONG'
+            quality = "VERY_STRONG"
             confidence = 0.9
         elif total_score >= 70:
-            quality = 'STRONG'
+            quality = "STRONG"
             confidence = 0.75
         elif total_score >= 60:
-            quality = 'MODERATE'
+            quality = "MODERATE"
             confidence = 0.6
         elif total_score >= 50:
-            quality = 'WEAK'
+            quality = "WEAK"
             confidence = 0.45
         else:
-            quality = 'VERY_WEAK'
+            quality = "VERY_WEAK"
             confidence = 0.3
-        
+
         return direction, quality, confidence
 
-
-    def _detect_institutional_bias(self, pa_breakdown, vp_breakdown, mtf_breakdown) -> str:
+    def _detect_institutional_bias(
+        self, pa_breakdown, vp_breakdown, mtf_breakdown
+    ) -> str:
         """
         Détecte le biais institutionnel (accumulation/distribution)
         """
-        bias_indicators = {
-            'accumulation': 0,
-            'distribution': 0,
-            'compression': 0
-        }
-        
+        bias_indicators = {"accumulation": 0, "distribution": 0, "compression": 0}
+
         # 1. Price Action Bias
-        if 'body_ratio_class' in pa_breakdown:
-            if pa_breakdown['body_ratio_class'] == 'SMALL':
-                bias_indicators['compression'] += 1
-            elif pa_breakdown['body_ratio_class'] == 'LARGE':
-                if pa_breakdown.get('green_streak', 0) > 3:
-                    bias_indicators['accumulation'] += 1
+        if "body_ratio_class" in pa_breakdown:
+            if pa_breakdown["body_ratio_class"] == "SMALL":
+                bias_indicators["compression"] += 1
+            elif pa_breakdown["body_ratio_class"] == "LARGE":
+                if pa_breakdown.get("green_streak", 0) > 3:
+                    bias_indicators["accumulation"] += 1
                 else:
-                    bias_indicators['distribution'] += 1
-        
+                    bias_indicators["distribution"] += 1
+
         # 2. Volume Bias
-        if 'vp_alignment' in vp_breakdown:
-            if vp_breakdown['vp_alignment'] == 'PRICE_UP_VOLUME_UP':
-                bias_indicators['accumulation'] += 2
-            elif vp_breakdown['vp_alignment'] == 'PRICE_DOWN_VOLUME_UP':
-                bias_indicators['distribution'] += 2
-        
+        if "vp_alignment" in vp_breakdown:
+            if vp_breakdown["vp_alignment"] == "PRICE_UP_VOLUME_UP":
+                bias_indicators["accumulation"] += 2
+            elif vp_breakdown["vp_alignment"] == "PRICE_DOWN_VOLUME_UP":
+                bias_indicators["distribution"] += 2
+
         # 3. Structure Bias
-        alignment_quality = mtf_breakdown.get('alignment_quality', 'NEUTRAL')
-        if alignment_quality == 'STRONG':
-            if mtf_breakdown.get('mtf_alignment', {}).get('direction') == 'BULLISH':
-                bias_indicators['accumulation'] += 1
+        alignment_quality = mtf_breakdown.get("alignment_quality", "NEUTRAL")
+        if alignment_quality == "STRONG":
+            if mtf_breakdown.get("mtf_alignment", {}).get("direction") == "BULLISH":
+                bias_indicators["accumulation"] += 1
             else:
-                bias_indicators['distribution'] += 1
-        
+                bias_indicators["distribution"] += 1
+
         # Détermination finale
         max_bias = max(bias_indicators, key=bias_indicators.get)
         max_value = bias_indicators[max_bias]
-        
+
         if max_value == 0:
-            return 'NEUTRAL'
-        elif max_bias == 'accumulation' and max_value >= 2:
-            return 'ACCUMULATION'
-        elif max_bias == 'distribution' and max_value >= 2:
-            return 'DISTRIBUTION'
-        elif max_bias == 'compression' and max_value >= 2:
-            return 'COMPRESSION'
+            return "NEUTRAL"
+        elif max_bias == "accumulation" and max_value >= 2:
+            return "ACCUMULATION"
+        elif max_bias == "distribution" and max_value >= 2:
+            return "DISTRIBUTION"
+        elif max_bias == "compression" and max_value >= 2:
+            return "COMPRESSION"
         else:
-            return 'NEUTRAL'
+            return "NEUTRAL"
 
-
-    def _assess_entry_quality(self, pa_breakdown, vp_breakdown, va_breakdown, total_score) -> str:
+    def _assess_entry_quality(
+        self, pa_breakdown, vp_breakdown, va_breakdown, total_score
+    ) -> str:
         """
         Évalue la qualité d'entrée pour le scalping
         """
         entry_score = 0
         max_score = 0
-        
+
         # 1. Price Action Quality (30 points max)
-        if 'body_ratio_class' in pa_breakdown:
-            body_class = pa_breakdown['body_ratio_class']
-            if body_class == 'MEDIUM':
+        if "body_ratio_class" in pa_breakdown:
+            body_class = pa_breakdown["body_ratio_class"]
+            if body_class == "MEDIUM":
                 entry_score += 20
                 max_score += 30
-            elif body_class == 'LARGE':
+            elif body_class == "LARGE":
                 entry_score += 15
                 max_score += 30
-            elif body_class == 'VERY_LARGE':
+            elif body_class == "VERY_LARGE":
                 entry_score += 10  # Trop volatile pour scalping
                 max_score += 30
-        
+
         # 2. Volume Confirmation (30 points max)
-        if 'vp_alignment' in vp_breakdown:
-            alignment = vp_breakdown['vp_alignment']
-            if alignment == 'PRICE_UP_VOLUME_UP' or alignment == 'PRICE_DOWN_VOLUME_UP':
+        if "vp_alignment" in vp_breakdown:
+            alignment = vp_breakdown["vp_alignment"]
+            if alignment == "PRICE_UP_VOLUME_UP" or alignment == "PRICE_DOWN_VOLUME_UP":
                 entry_score += 25
                 max_score += 30
-        
+
         # 3. Velocity Stability (20 points max)
-        if 'trend_stability' in va_breakdown:
-            stability = va_breakdown['trend_stability']
-            if stability == 'STABLE':
+        if "trend_stability" in va_breakdown:
+            stability = va_breakdown["trend_stability"]
+            if stability == "STABLE":
                 entry_score += 15
                 max_score += 20
-            elif stability == 'ACCELERATING':
+            elif stability == "ACCELERATING":
                 entry_score += 10
                 max_score += 20
-        
+
         # 4. Momentum Score (20 points max)
         momentum_points = (total_score / 100) * 20
         entry_score += momentum_points
         max_score += 20
-        
-        if max_score == 0:
-            return 'POOR'
-        
-        quality_percentage = (entry_score / max_score) * 100
-        
-        if quality_percentage >= 80:
-            return 'EXCELLENT'
-        elif quality_percentage >= 65:
-            return 'GOOD'
-        elif quality_percentage >= 50:
-            return 'FAIR'
-        else:
-            return 'POOR'
 
+        if max_score == 0:
+            return "POOR"
+
+        quality_percentage = (entry_score / max_score) * 100
+
+        if quality_percentage >= 80:
+            return "EXCELLENT"
+        elif quality_percentage >= 65:
+            return "GOOD"
+        elif quality_percentage >= 50:
+            return "FAIR"
+        else:
+            return "POOR"
 
     def _log_momentum_analysis(self, response: dict):
         """
@@ -3885,7 +4084,7 @@ class ScalpingStrategy(BaseStrategy):
             f"Bias: {response['institutional_bias']} | "
             f"Entry: {response['entry_quality']}"
         )
-        
+
         # Log détaillé en debug
         self.logger.debug(
             f"[MOMENTUM_BREAKDOWN] PriceAction: {response['breakdown']['price_action'].get('body_ratio_class', 'N/A')} | "
@@ -3894,28 +4093,26 @@ class ScalpingStrategy(BaseStrategy):
             f"Structure: {response['breakdown']['structure_analysis'].get('alignment_quality', 'N/A')}"
         )
 
-
     def _get_neutral_momentum_response(self) -> dict:
         """
         Retourne une réponse neutre par défaut
         """
         return {
-            'primary_direction': 'NEUTRAL',
-            'momentum_score': 50.0,
-            'momentum_quality': 'NEUTRAL',
-            'confidence': 0.5,
-            'institutional_bias': 'NEUTRAL',
-            'entry_quality': 'POOR',
-            'breakdown': {
-                'price_action': {'status': 'INSUFFICIENT_DATA'},
-                'volume_profile': {'status': 'INSUFFICIENT_DATA'},
-                'velocity_metrics': {'status': 'INSUFFICIENT_DATA'},
-                'structure_analysis': {'status': 'INSUFFICIENT_DATA'}
+            "primary_direction": "NEUTRAL",
+            "momentum_score": 50.0,
+            "momentum_quality": "NEUTRAL",
+            "confidence": 0.5,
+            "institutional_bias": "NEUTRAL",
+            "entry_quality": "POOR",
+            "breakdown": {
+                "price_action": {"status": "INSUFFICIENT_DATA"},
+                "volume_profile": {"status": "INSUFFICIENT_DATA"},
+                "velocity_metrics": {"status": "INSUFFICIENT_DATA"},
+                "structure_analysis": {"status": "INSUFFICIENT_DATA"},
             },
-            'timestamp': pd.Timestamp.now().isoformat(),
-            'version': 'Institutional Momentum Analyzer v2.0'
+            "timestamp": pd.Timestamp.now().isoformat(),
+            "version": "Institutional Momentum Analyzer v2.0",
         }
-
 
     # ===================================================================
     # FONCTIONS AUXILIAIRES (à implémenter selon vos besoins)
@@ -3925,67 +4122,60 @@ class ScalpingStrategy(BaseStrategy):
         """Détection avancée de patterns de bougies"""
         patterns = []
         pattern_score = 0
-        
+
         # Implémentez votre logique de détection de patterns
         # Ex: Hammer, Engulfing, Doji, etc.
-        
-        return {
-            'patterns': patterns,
-            'pattern_score': pattern_score
-        }
+
+        return {"patterns": patterns, "pattern_score": pattern_score}
 
     def _calculate_green_sequence(self, df: pd.DataFrame) -> dict:
         """Analyse de séquence de bougies vertes"""
-        closes = df['close'].values
-        opens = df['open'].values
-        
+        closes = df["close"].values
+        opens = df["open"].values
+
         green_streak = 0
         current_streak = 0
-        
+
         for i in range(len(closes)):
             if closes[i] > opens[i]:
                 current_streak += 1
                 green_streak = max(green_streak, current_streak)
             else:
                 current_streak = 0
-        
+
         score = min(100, green_streak * 25)  # 4 bougies = 100
-        
-        return {
-            'streak': green_streak,
-            'score': score,
-            'consecutive': current_streak
-        }
+
+        return {"streak": green_streak, "score": score, "consecutive": current_streak}
 
     def _calculate_close_sequence(self, closes: np.ndarray) -> dict:
         """Analyse de séquence des closes"""
         if len(closes) < 2:
-            return {'slope': 0, 'score': 50}
-        
+            return {"slope": 0, "score": 50}
+
         x = np.arange(len(closes))
         slope, intercept = np.polyfit(x, closes, 1)
-        
+
         # Score basé sur la pente (normalisé)
         slope_score = min(100, abs(slope) * 10000 * 10)  # Ajustez le multiplicateur
-        
+
         return {
-            'slope': slope,
-            'intercept': intercept,
-            'score': slope_score,
-            'direction': 'UP' if slope > 0 else 'DOWN'
+            "slope": slope,
+            "intercept": intercept,
+            "score": slope_score,
+            "direction": "UP" if slope > 0 else "DOWN",
         }
 
     def _calculate_wick_balance(self, upper_wicks: list, lower_wicks: list) -> float:
         """Calcule l'équilibre des mèches"""
         if not upper_wicks and not lower_wicks:
             return 50
-        
+
         avg_upper = np.mean(upper_wicks) if upper_wicks else 0
         avg_lower = np.mean(lower_wicks) if lower_wicks else 0
-        
+
         if avg_upper + avg_lower == 0:
             return 50
-        
+
         # Score: plus de mèches basses = bullish, plus de mèches hautes = bearish
         balance = (avg_lower - avg_upper) / (avg_upper + avg_lower)
         return 50 + (balance * 50)  # Normalisé 0-100
@@ -3993,111 +4183,124 @@ class ScalpingStrategy(BaseStrategy):
     def _classify_body_ratio(self, ratio: float) -> str:
         """Classifie le ratio des corps de bougies"""
         if ratio < 0.3:
-            return 'SMALL'
+            return "SMALL"
         elif ratio < 0.5:
-            return 'MEDIUM'
+            return "MEDIUM"
         elif ratio < 0.7:
-            return 'LARGE'
+            return "LARGE"
         else:
-            return 'VERY_LARGE'
+            return "VERY_LARGE"
 
     def _calculate_volume_trend(self, volume_series: pd.Series) -> dict:
         """Analyse de tendance du volume"""
         if len(volume_series) < 3:
-            return {'direction': 'NEUTRAL', 'score': 50, 'acceleration': 0}
-        
+            return {"direction": "NEUTRAL", "score": 50, "acceleration": 0}
+
         # Tendance linéaire
         x = np.arange(len(volume_series))
         slope, _ = np.polyfit(x, volume_series.values, 1)
-        
+
         # Accélération (dérivée seconde)
         if len(volume_series) >= 5:
             acceleration = np.polyfit(x, volume_series.values, 2)[0] * 2
         else:
             acceleration = 0
-        
-        direction = 'UP' if slope > 0 else 'DOWN' if slope < 0 else 'FLAT'
-        score = min(100, abs(slope) * 100)  # Normalisé
-        
-        return {
-            'direction': direction,
-            'score': score,
-            'acceleration': acceleration
-        }
 
-    def _detect_volume_spikes(self, volume_series: pd.Series, avg_volume: float) -> dict:
+        direction = "UP" if slope > 0 else "DOWN" if slope < 0 else "FLAT"
+        score = min(100, abs(slope) * 100)  # Normalisé
+
+        return {"direction": direction, "score": score, "acceleration": acceleration}
+
+    def _detect_volume_spikes(
+        self, volume_series: pd.Series, avg_volume: float
+    ) -> dict:
         """Détection des spikes de volume"""
         spikes = []
         spike_threshold = avg_volume * 1.5  # 50% au-dessus de la moyenne
-        
+
         for i, vol in enumerate(volume_series):
             if vol > spike_threshold:
-                spikes.append({
-                    'index': i,
-                    'volume': vol,
-                    'ratio': vol / avg_volume
-                })
-        
-        last_spike_ratio = spikes[-1]['ratio'] if spikes else 0
+                spikes.append({"index": i, "volume": vol, "ratio": vol / avg_volume})
+
+        last_spike_ratio = spikes[-1]["ratio"] if spikes else 0
         spike_score = min(100, len(spikes) * 20 + last_spike_ratio * 10)
-        
+
         return {
-            'count': len(spikes),
-            'spikes': spikes,
-            'last_ratio': last_spike_ratio,
-            'score': spike_score
+            "count": len(spikes),
+            "spikes": spikes,
+            "last_ratio": last_spike_ratio,
+            "score": spike_score,
         }
 
-    def _calculate_volume_price_correlation(self, prices: np.ndarray, volumes: np.ndarray) -> dict:
+    def _calculate_volume_price_correlation(
+        self, prices: np.ndarray, volumes: np.ndarray
+    ) -> dict:
         """Calcule la corrélation volume-prix"""
         if len(prices) < 3 or len(volumes) < 3:
-            return {'correlation': 0, 'strength': 'WEAK', 'score': 50, 'alignment': 'NEUTRAL'}
-        
+            return {
+                "correlation": 0,
+                "strength": "WEAK",
+                "score": 50,
+                "alignment": "NEUTRAL",
+            }
+
         price_changes = np.diff(prices)
         volume_changes = np.diff(volumes)
-        
+
         correlation = np.corrcoef(price_changes, volume_changes)[0, 1]
-        
+
         if np.isnan(correlation):
             correlation = 0
-        
+
         # Classification
         if correlation > 0.7:
-            strength = 'VERY_STRONG'
-            alignment = 'PRICE_UP_VOLUME_UP' if price_changes[-1] > 0 else 'PRICE_DOWN_VOLUME_UP'
+            strength = "VERY_STRONG"
+            alignment = (
+                "PRICE_UP_VOLUME_UP"
+                if price_changes[-1] > 0
+                else "PRICE_DOWN_VOLUME_UP"
+            )
             score = 90
         elif correlation > 0.4:
-            strength = 'STRONG'
-            alignment = 'PRICE_UP_VOLUME_UP' if price_changes[-1] > 0 else 'PRICE_DOWN_VOLUME_UP'
+            strength = "STRONG"
+            alignment = (
+                "PRICE_UP_VOLUME_UP"
+                if price_changes[-1] > 0
+                else "PRICE_DOWN_VOLUME_UP"
+            )
             score = 75
         elif correlation > 0.2:
-            strength = 'MODERATE'
-            alignment = 'PRICE_UP_VOLUME_UP' if price_changes[-1] > 0 else 'PRICE_DOWN_VOLUME_UP'
+            strength = "MODERATE"
+            alignment = (
+                "PRICE_UP_VOLUME_UP"
+                if price_changes[-1] > 0
+                else "PRICE_DOWN_VOLUME_UP"
+            )
             score = 60
         elif correlation > -0.2:
-            strength = 'WEAK'
-            alignment = 'NEUTRAL'
+            strength = "WEAK"
+            alignment = "NEUTRAL"
             score = 50
         else:
-            strength = 'NEGATIVE'
-            alignment = 'DIVERGENCE'
+            strength = "NEGATIVE"
+            alignment = "DIVERGENCE"
             score = 30
-        
+
         return {
-            'correlation': round(correlation, 3),
-            'strength': strength,
-            'score': score,
-            'alignment': alignment
+            "correlation": round(correlation, 3),
+            "strength": strength,
+            "score": score,
+            "alignment": alignment,
         }
 
     def _normalize_velocity_score(self, velocity: float, atr: float) -> float:
         """Normalise le score de vélocité par rapport à l'ATR"""
         if atr == 0:
             return 50
-        
+
         velocity_in_pips = velocity * 10000
         velocity_ratio = velocity_in_pips / atr
-        
+
         # Score: 0-100, centré sur 50
         score = 50 + (velocity_ratio * 100)
         return max(0, min(100, score))
@@ -4105,7 +4308,7 @@ class ScalpingStrategy(BaseStrategy):
     def _normalize_acceleration_score(self, acceleration: float) -> float:
         """Normalise le score d'accélération"""
         acceleration_in_pips = acceleration * 10000
-        
+
         # Score basé sur l'accélération
         if abs(acceleration_in_pips) < 0.5:
             return 50  # Neutre
@@ -4119,10 +4322,10 @@ class ScalpingStrategy(BaseStrategy):
     def _normalize_jerk_score(self, jerk: float) -> float:
         """Normalise le score de jerk"""
         jerk_in_pips = jerk * 10000
-        
+
         # Pour le scalping, un jerk modéré est mieux qu'un jerk fort
         jerk_abs = abs(jerk_in_pips)
-        
+
         if jerk_abs < 0.2:
             return 60  # Légèrement positif pour stabilité
         elif jerk_abs < 0.5:
@@ -4135,49 +4338,51 @@ class ScalpingStrategy(BaseStrategy):
     def _classify_velocity(self, velocity: float, atr: float) -> str:
         """Classifie la vélocité"""
         if atr == 0:
-            return 'NEUTRAL'
-        
+            return "NEUTRAL"
+
         velocity_ratio = (velocity * 10000) / atr
-        
+
         if abs(velocity_ratio) < 0.1:
-            return 'STAGNANT'
+            return "STAGNANT"
         elif abs(velocity_ratio) < 0.3:
-            return 'SLOW'
+            return "SLOW"
         elif abs(velocity_ratio) < 0.7:
-            return 'MODERATE'
+            return "MODERATE"
         elif abs(velocity_ratio) < 1.2:
-            return 'FAST'
+            return "FAST"
         else:
-            return 'VERY_FAST'
+            return "VERY_FAST"
 
     def _classify_acceleration(self, acceleration: float) -> str:
         """Classifie l'accélération"""
         acc_pips = acceleration * 10000
-        
-        if abs(acc_pips) < 0.1:
-            return 'CONSTANT'
-        elif acc_pips > 0.1:
-            return 'ACCELERATING'
-        elif acc_pips < -0.1:
-            return 'DECELERATING'
-        else:
-            return 'STABLE'
 
-    def _assess_trend_stability(self, velocity: np.ndarray, acceleration: np.ndarray) -> str:
+        if abs(acc_pips) < 0.1:
+            return "CONSTANT"
+        elif acc_pips > 0.1:
+            return "ACCELERATING"
+        elif acc_pips < -0.1:
+            return "DECELERATING"
+        else:
+            return "STABLE"
+
+    def _assess_trend_stability(
+        self, velocity: np.ndarray, acceleration: np.ndarray
+    ) -> str:
         """Évalue la stabilité de la tendance"""
         if len(velocity) < 2:
-            return 'UNKNOWN'
-        
+            return "UNKNOWN"
+
         velocity_std = np.std(velocity)
         acceleration_std = np.std(acceleration) if len(acceleration) > 0 else 0
-        
+
         if velocity_std < 0.001 and acceleration_std < 0.0005:
-            return 'VERY_STABLE'
+            return "VERY_STABLE"
         elif velocity_std < 0.002 and acceleration_std < 0.001:
-            return 'STABLE'
+            return "STABLE"
         elif velocity_std < 0.005 and acceleration_std < 0.002:
-            return 'MODERATE'
+            return "MODERATE"
         elif velocity_std < 0.01 and acceleration_std < 0.005:
-            return 'VOLATILE'
+            return "VOLATILE"
         else:
-            return 'VERY_VOLATILE'
+            return "VERY_VOLATILE"

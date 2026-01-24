@@ -1,706 +1,553 @@
 """
-SimpleAdvancedScorer - Système de scoring composite évolutif
+UnifiedScorer - Systeme de scoring unifie
 
-Architecture à 5 composants pondérés :
-- OrderFlow (50%) : Score V6 existant
-- Microstructure (20%) : Tape speed, accélération, clusters
-- Liquidity (15%) : Pressure ratio, continuité
-- Divergence (10%) : Divergence price/delta
-- Smart Money (5%) : Large ticks, absorption patterns
+Fusion de 3 systemes en 1 (24 Janvier 2026):
+- calculate_score_integrated (OrderFlow V6)
+- calculate_composite_score (multi-dimensionnel)
+- _score_candidate (contexte + risque)
 
-Date création : 03 Janvier 2026
+Architecture finale:
+- OrderFlow (35%): Delta, Volume, Imbalance, Footprint
+- Institutional (25%): 5 analyseurs (Memory, Fatigue, Physics, Tape, Pressure)
+- Context (20%): Phase, Alignment, Confidence
+- Technical (15%): Setup score, Patterns
+- Risk (5%): Spread, Volatility
 """
 
 import logging
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-class SimpleAdvancedScorer:
+# ============================================================================
+# FONCTION UNIFIEE DE SCORING (24 Jan 2026)
+# ============================================================================
+
+def calculate_unified_score(
+    # OrderFlow params
+    metrics: Optional[Dict[str, float]] = None,
+    patterns: Optional[Dict[str, Any]] = None,
+    footprint_data: Optional[Dict[str, Any]] = None,
+    current_regime: Optional[str] = None,
+    rescue_level: int = 0,
+    # Data params
+    ticks_df: Optional[pd.DataFrame] = None,
+    candles_df: Optional[pd.DataFrame] = None,
+    # Institutional params
+    institutional_analysis: Optional[Dict[str, Any]] = None,
+    # Candidate params
+    candidate: Optional[Dict[str, Any]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    asset_signals: Optional[Dict[str, Any]] = None,
+    # Weights (optionnel)
+    weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
     """
-    Scoring composite évolutif pour analyse multi-dimensionnelle du marché.
+    Fonction de scoring unifiee - combine OrderFlow + Composite + Candidate.
 
-    Combine 5 signaux institutionnels avec pondération configurable.
+    Args:
+        metrics: Metriques OrderFlow (delta_total, total_volume, imbalance_mean, etc.)
+        patterns: Patterns detectes
+        footprint_data: Donnees footprint (buy_volume, sell_volume, etc.)
+        current_regime: "trending", "consolidation", "range"
+        rescue_level: Niveau de rescue (0=normal, 1=soft, 2+=hard)
+        ticks_df: DataFrame des ticks
+        candles_df: DataFrame M1
+        institutional_analysis: Resultats des 5 analyseurs
+        candidate: Candidat d'entree (action, technical_score, etc.)
+        meta: Metadata (spread_pips, etc.)
+        asset_signals: Signaux de l'asset (phase, confidence_score, etc.)
+        weights: Poids custom
+
+    Returns:
+        {
+            'final_score': float (0-100),
+            'normalized_score': float (0-1),
+            'status': str (VALID/SUSPECT),
+            'decision': str (BUY/SELL/HOLD),
+            'confidence': str (STRONG/GOOD/WEAK/NONE),
+            'components': {orderflow, institutional, context, technical, risk},
+            'details': {...}
+        }
     """
+    # Defaults
+    metrics = metrics or {}
+    patterns = patterns or {}
+    footprint_data = footprint_data or {}
+    candidate = candidate or {}
+    meta = meta or {}
+    asset_signals = asset_signals or {}
 
-    def __init__(self, config: Optional[Dict[str, float]] = None, thresholds: Optional[Dict[str, float]] = None):
-        """
-        Initialiser le scorer avec poids et seuils configurables.
+    # Poids par defaut
+    default_weights = {
+        'orderflow': 0.35,
+        'institutional': 0.25,
+        'context': 0.20,
+        'technical': 0.15,
+        'risk': 0.05
+    }
+    w = {**default_weights, **(weights or {})}
 
-        Args:
-            config: Dictionnaire de poids (optionnel)
-                   Si None, utilise poids par défaut
-            thresholds: Seuils de décision (optionnel)
-                       Si None, utilise seuils par défaut
-        """
-        # Poids par défaut (somme = 1.0)
-        # 06 JAN 2026 PHASE 3: Intégration des 5 analyseurs institutionnels!
-        self.weights = {
-            'orderflow': 0.35,      # Score V6 existant (réduit 50→35%)
-            'institutional': 0.25,  # 🆕 Les 5 analyseurs sophistiqués!
-            'microstructure': 0.15, # Tape speed, clusters (réduit 20→15%)
-            'liquidity': 0.15,      # Pressure, continuité
-            'divergence': 0.05,     # Price/delta divergence (réduit 10→5%)
-            'smart_money': 0.05     # Large ticks, absorption
+    # Normaliser les poids
+    total_w = sum(w.values())
+    if total_w > 0:
+        w = {k: v/total_w for k, v in w.items()}
+
+    # ========================================================================
+    # 1. ORDERFLOW SCORE (0-100)
+    # ========================================================================
+    orderflow_score = _calculate_orderflow_component(
+        metrics, patterns, footprint_data, current_regime, rescue_level
+    )
+
+    # ========================================================================
+    # 2. INSTITUTIONAL SCORE (0-100)
+    # ========================================================================
+    institutional_score = _calculate_institutional_component(
+        institutional_analysis, ticks_df, candles_df
+    )
+
+    # ========================================================================
+    # 3. CONTEXT SCORE (0-100)
+    # ========================================================================
+    context_score = _calculate_context_component(
+        candidate, asset_signals
+    )
+
+    # ========================================================================
+    # 4. TECHNICAL SCORE (0-100)
+    # ========================================================================
+    technical_score = _calculate_technical_component(
+        candidate, patterns
+    )
+
+    # ========================================================================
+    # 5. RISK SCORE (0-100)
+    # ========================================================================
+    risk_score = _calculate_risk_component(meta)
+
+    # ========================================================================
+    # SCORE FINAL
+    # ========================================================================
+    components = {
+        'orderflow': round(orderflow_score, 2),
+        'institutional': round(institutional_score, 2),
+        'context': round(context_score, 2),
+        'technical': round(technical_score, 2),
+        'risk': round(risk_score, 2)
+    }
+
+    final_score = (
+        w['orderflow'] * orderflow_score +
+        w['institutional'] * institutional_score +
+        w['context'] * context_score +
+        w['technical'] * technical_score +
+        w['risk'] * risk_score
+    )
+    final_score = max(0.0, min(100.0, final_score))
+
+    # Status
+    if rescue_level >= 2:
+        status = "SUSPECT"
+    elif final_score >= 65:
+        status = "VALID"
+    elif final_score >= 50:
+        status = "MARGINAL"
+    else:
+        status = "SUSPECT"
+
+    # Decision et Confidence
+    decision, confidence = _determine_decision(final_score, components, candidate)
+
+    return {
+        'final_score': round(final_score, 2),
+        'normalized_score': round(final_score / 100.0, 4),
+        'status': status,
+        'decision': decision,
+        'confidence': confidence,
+        'components': components,
+        'weights': w,
+        'details': {
+            'regime': current_regime or 'unknown',
+            'rescue_level': rescue_level,
+            'has_footprint': bool(footprint_data),
+            'has_ticks': ticks_df is not None,
+            'has_institutional': bool(institutional_analysis)
         }
-
-        # 🔧 FIX BUG #3 (05 JAN 2026): Seuils configurables au lieu de hardcodés
-        self.thresholds = {
-            'STRONG_THRESHOLD': 75.0,
-            'GOOD_THRESHOLD': 65.0,
-            'WEAK_THRESHOLD': 55.0,
-            'NEUTRAL_LOW': 45.0,
-            'NEUTRAL_HIGH': 55.0
-        }
-
-        # Override avec config custom si fourni
-        if config:
-            for key in self.weights:
-                if key in config:
-                    self.weights[key] = config[key]
-
-        # Override seuils si fournis
-        if thresholds:
-            for key in self.thresholds:
-                if key in thresholds:
-                    self.thresholds[key] = thresholds[key]
-
-        # Normaliser pour garantir somme = 1.0
-        total_weight = sum(self.weights.values())
-        if total_weight != 1.0:
-            logger.warning(f"[ADVANCED_SCORER] Poids non normalisés (somme={total_weight:.2f}), normalisation automatique")
-            for key in self.weights:
-                self.weights[key] /= total_weight
-
-        logger.info(f"[ADVANCED_SCORER] Initialisé avec poids: {self.weights}, seuils: {self.thresholds}")
+    }
 
 
-    def calculate_composite_score(
-        self,
-        ticks_df: Optional[pd.DataFrame],
-        candles_df: pd.DataFrame,
-        orderflow_score: float,
-        institutional_analysis: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Calculer le score composite à partir des 6 composants (PHASE 3 - 06 JAN 2026).
+def _calculate_orderflow_component(
+    metrics: Dict[str, float],
+    patterns: Dict[str, Any],
+    footprint_data: Dict[str, Any],
+    regime: Optional[str],
+    rescue_level: int
+) -> float:
+    """Calcule le score OrderFlow (delta, volume, imbalance, footprint)."""
+    if not metrics:
+        return 50.0  # Neutre si pas de donnees
 
-        Args:
-            ticks_df: DataFrame des ticks (None si indisponible)
-            candles_df: DataFrame M1 (minimum 10 bougies)
-            orderflow_score: Score OrderFlow V6 (0-100)
-            institutional_analysis: Résultats des 5 analyseurs institutionnels
-
-        Returns:
-            {
-                'composite_score': float (0-100),
-                'components': dict (scores individuels),
-                'decision': str (BUY/SELL/HOLD),
-                'confidence': str (STRONG/GOOD/WEAK/NONE),
-                'details': dict (métriques détaillées)
-            }
-        """
-        # Valider inputs
-        if candles_df is None or candles_df.empty:
-            logger.error("[ADVANCED_SCORER] candles_df vide, impossible de scorer")
-            return self._default_result(reason="NO_CANDLES")
-
-        if len(candles_df) < 10:
-            logger.warning(f"[ADVANCED_SCORER] candles_df trop court ({len(candles_df)} bougies), scores limités")
-
-        # Calculer chaque composant
-        # 🔧 FIX BUG #8 (05 JAN 2026): Défauts 0.0 au lieu de 50.0 pour pénaliser absence de données
-        # Ancien comportement: 50.0 neutre → composite biaisé vers 75+ même sans signal
-        # Nouveau comportement: 0.0 pénalité → composite reflète vraiment la qualité du signal
-        # 🆕 06 JAN 2026 PHASE 3: Ajout du composant institutional (les 5 analyseurs!)
+    # Helpers
+    def _get_float(d, k, default=0.0):
         try:
-            components = {
-                'orderflow': orderflow_score,  # Déjà calculé
-                'institutional': self._calculate_institutional_score(institutional_analysis) if institutional_analysis else 50.0,  # 🆕 Les 5 analyseurs!
-                'microstructure': self._calculate_microstructure_score(ticks_df) if ticks_df is not None else 0.0,
-                'liquidity': self._calculate_liquidity_score(ticks_df) if ticks_df is not None else 0.0,
-                'divergence': self._calculate_divergence_score(ticks_df, candles_df) if ticks_df is not None else 0.0,
-                'smart_money': self._calculate_smart_money_score(ticks_df) if ticks_df is not None else 0.0
-            }
-        except Exception as e:
-            logger.error(f"[ADVANCED_SCORER] Erreur calcul composants: {e}", exc_info=True)
-            return self._default_result(reason=f"CALC_ERROR: {e}")
+            v = float(d.get(k, default))
+            return v if np.isfinite(v) else default
+        except:
+            return default
 
-        # Score composite pondéré
-        composite_score = sum(
-            components[comp] * self.weights[comp]
-            for comp in components
-        )
+    delta_of = _get_float(metrics, "delta_total", 0.0)
+    total_vol = _get_float(metrics, "total_volume", 0.0)
+    imb_mean = _get_float(metrics, "imbalance_mean", 0.5)
+    rows = int(metrics.get("rows", 0) or 0)
 
-        # Clamp 0-100
-        composite_score = max(0.0, min(100.0, composite_score))
+    # Footprint
+    fp_available = bool(footprint_data)
+    fp_delta = _get_float(footprint_data, "delta_total", 0.0)
+    fp_buy_vol = _get_float(footprint_data, "buy_volume", 0.0)
+    fp_sell_vol = _get_float(footprint_data, "sell_volume", 0.0)
+    fp_total_vol = fp_buy_vol + fp_sell_vol
 
-        # Déterminer décision et confiance
-        decision, confidence = self._determine_decision(composite_score, components)
+    # Delta combined
+    if fp_available and abs(fp_delta) > 0:
+        delta_combined = (fp_delta * 0.7) + (delta_of * 0.3)
+        vol_combined = max(fp_total_vol, total_vol)
+    else:
+        delta_combined = delta_of
+        vol_combined = total_vol
 
-        # Résultat détaillé
-        result = {
-            'composite_score': round(composite_score, 2),
-            'components': {k: round(v, 2) for k, v in components.items()},
-            'decision': decision,
-            'confidence': confidence,
-            'details': {
-                'weights': self.weights,
-                'has_ticks': ticks_df is not None,
-                'candles_count': len(candles_df)
-            }
-        }
+    delta_ratio = abs(delta_combined) / max(vol_combined, 1.0) if vol_combined > 1e-6 else 0.0
 
-        logger.info(
-            f"[ADVANCED_SCORER] Composite={composite_score:.1f}/100 | "
-            f"Decision={decision} ({confidence}) | "
-            f"Components: OF={components['orderflow']:.0f} INST={components['institutional']:.0f} MS={components['microstructure']:.0f} "
-            f"LQ={components['liquidity']:.0f} DV={components['divergence']:.0f} SM={components['smart_money']:.0f}"
-        )
+    # Delta score (0-30)
+    if delta_ratio >= 0.3:
+        delta_pts = 30.0
+    elif delta_ratio >= 0.2:
+        delta_pts = 22.5 + ((delta_ratio - 0.2) / 0.1) * 7.5
+    elif delta_ratio >= 0.1:
+        delta_pts = 15.0 + ((delta_ratio - 0.1) / 0.1) * 7.5
+    else:
+        delta_pts = (delta_ratio / 0.1) * 15.0
 
-        return result
+    # Volume score (0-20)
+    avg_vol = total_vol / max(rows, 1) if rows > 0 else total_vol
+    vol_ratio = total_vol / max(avg_vol, 1.0) if avg_vol > 0 else 1.0
+
+    if vol_ratio >= 1.2:
+        volume_pts = 20.0
+    elif vol_ratio >= 1.0:
+        volume_pts = 15.0 + ((vol_ratio - 1.0) / 0.2) * 5.0
+    elif vol_ratio >= 0.8:
+        volume_pts = 10.0 + ((vol_ratio - 0.8) / 0.2) * 5.0
+    else:
+        volume_pts = (vol_ratio / 0.8) * 10.0
+
+    # Imbalance score (0-10)
+    imb_strength = abs(imb_mean - 0.5) / 0.5
+    imbalance_pts = imb_strength * 10.0
+
+    # Footprint bonus (0-15)
+    footprint_pts = 0.0
+    if fp_available:
+        fp_absorption = bool(footprint_data.get("absorption_flag", False))
+        if fp_absorption:
+            footprint_pts = 15.0
+        elif delta_ratio > 0.25:
+            footprint_pts = 10.0
+        else:
+            footprint_pts = 5.0
+
+    # Pattern bonus (0-15)
+    pattern_count = 0
+    if isinstance(patterns, dict):
+        pattern_count = sum(1 for v in patterns.values() if bool(v))
+    elif isinstance(patterns, list):
+        pattern_count = len(patterns)
+    pattern_pts = min(15.0, pattern_count * 5.0)
+
+    # Penalties
+    penalty = 0.0
+    if rescue_level == 1:
+        penalty = 5.0
+    elif rescue_level >= 2:
+        penalty = 15.0
+    if total_vol < 50 and not fp_available:
+        penalty += 5.0
+
+    # Total (max 90 avant penalty)
+    score = delta_pts + volume_pts + imbalance_pts + footprint_pts + pattern_pts - penalty
+    return max(0.0, min(100.0, score))
 
 
-    def _calculate_microstructure_score(self, ticks_df: pd.DataFrame) -> float:
-        """
-        Analyser la microstructure du marché (tape speed, accélération, clusters).
+def _calculate_institutional_component(
+    institutional_analysis: Optional[Dict[str, Any]],
+    ticks_df: Optional[pd.DataFrame],
+    candles_df: Optional[pd.DataFrame]
+) -> float:
+    """Calcule le score Institutional (5 analyseurs + microstructure)."""
+    if not institutional_analysis and ticks_df is None:
+        return 50.0  # Neutre
 
-        Score basé sur :
-        - Tape speed (ticks/seconde) : vitesse du tape
-        - Accélération : variation de la vitesse
-        - Clusters : concentration des trades
+    scores = []
 
-        Returns:
-            Score 0-100
-        """
-        if ticks_df is None or ticks_df.empty or len(ticks_df) < 10:
-            return 50.0  # Neutre si données insuffisantes
+    # 1. Price Memory
+    if institutional_analysis:
+        price_memory = institutional_analysis.get('price_memory', {})
+        memory_signals = price_memory.get('memory_signals', [])
+        fresh_levels = price_memory.get('fresh_levels', [])
+        if memory_signals or fresh_levels:
+            fresh_ratio = len(fresh_levels) / max(1, len(memory_signals) + len(fresh_levels))
+            scores.append(50.0 + (fresh_ratio - 0.5) * 50.0)
 
+    # 2. Market Fatigue
+    if institutional_analysis:
+        fatigue = institutional_analysis.get('market_fatigue', {})
+        fatigue_state = str(fatigue.get('market_state', '')).upper()
+        if fatigue_state == 'EXHAUSTED':
+            scores.append(30.0)
+        elif fatigue_state == 'FATIGUED':
+            scores.append(40.0)
+        elif fatigue_state == 'NORMAL':
+            scores.append(50.0)
+        elif fatigue_state == 'ENERGETIC':
+            scores.append(65.0)
+
+    # 3. Market Physics
+    if institutional_analysis:
+        physics = institutional_analysis.get('market_physics', {})
+        physics_bias = str(physics.get('physics_bias', '')).upper()
+        if 'BULLISH' in physics_bias or 'BUY' in physics_bias:
+            scores.append(75.0)
+        elif 'BEARISH' in physics_bias or 'SELL' in physics_bias:
+            scores.append(25.0)
+        elif physics_bias:
+            scores.append(50.0)
+
+    # 4. Tape Speed
+    if institutional_analysis:
+        tape = institutional_analysis.get('tape_speed', {})
+        speed_ratio = float(tape.get('speed_ratio', 1.0) or 1.0)
+        if speed_ratio >= 2.0:
+            scores.append(70.0)
+        elif speed_ratio >= 1.5:
+            scores.append(60.0)
+        elif speed_ratio >= 0.8:
+            scores.append(50.0)
+        else:
+            scores.append(35.0)
+
+    # 5. Pressure
+    if institutional_analysis:
+        pressure = institutional_analysis.get('pressure_ratio', {})
+        pressure_norm = float(pressure.get('normalized_pressure', 0.0) or 0.0)
+        scores.append(50.0 + (pressure_norm * 50.0))
+
+    # 6. Microstructure from ticks
+    if ticks_df is not None and len(ticks_df) >= 10:
         try:
-            # 1. Tape speed (ticks par seconde)
             if 'time' in ticks_df.columns:
-                ticks_df['time'] = pd.to_datetime(ticks_df['time'], unit='s')
-                duration_seconds = (ticks_df['time'].max() - ticks_df['time'].min()).total_seconds()
-                if duration_seconds > 0:
-                    tape_speed = len(ticks_df) / duration_seconds
-                else:
-                    tape_speed = 0.0
-            else:
-                tape_speed = 0.0
-
-            # Score tape speed : 0-5 ticks/s → 0-100
-            speed_score = min(100.0, (tape_speed / 5.0) * 100.0)
-
-            # 2. Accélération (variance de la vitesse)
-            # Diviser en 5 segments et calculer vitesse par segment
-            segment_size = max(1, len(ticks_df) // 5)
-            speeds = []
-            for i in range(5):
-                start_idx = i * segment_size
-                end_idx = min((i + 1) * segment_size, len(ticks_df))
-                segment = ticks_df.iloc[start_idx:end_idx]
-
-                if 'time' in segment.columns and len(segment) > 1:
-                    seg_duration = (segment['time'].max() - segment['time'].min()).total_seconds()
-                    if seg_duration > 0:
-                        speeds.append(len(segment) / seg_duration)
-
-            if len(speeds) >= 2:
-                acceleration = np.std(speeds)  # Écart-type = accélération
-                accel_score = min(100.0, (acceleration / 2.0) * 100.0)
-            else:
-                accel_score = 50.0
-
-            # 3. Clusters (concentration des trades)
-            # Mesurer si les ticks sont groupés ou dispersés
-            if 'volume' in ticks_df.columns:
-                # Volume moyen des 20% plus gros trades
-                top_20_pct = int(len(ticks_df) * 0.2)
-                if top_20_pct > 0:
-                    sorted_vol = ticks_df['volume'].sort_values(ascending=False)
-                    avg_top = sorted_vol.iloc[:top_20_pct].mean()
-                    avg_all = ticks_df['volume'].mean()
-
-                    if avg_all > 0:
-                        cluster_ratio = avg_top / avg_all
-                        cluster_score = min(100.0, (cluster_ratio / 3.0) * 100.0)
-                    else:
-                        cluster_score = 50.0
-                else:
-                    cluster_score = 50.0
-            else:
-                cluster_score = 50.0
-
-            # Score final : moyenne pondérée
-            microstructure_score = (
-                speed_score * 0.5 +      # Tape speed = 50%
-                accel_score * 0.3 +      # Accélération = 30%
-                cluster_score * 0.2      # Clusters = 20%
-            )
-
-            return round(microstructure_score, 2)
-
-        except Exception as e:
-            logger.error(f"[MICROSTRUCTURE] Erreur calcul: {e}", exc_info=True)
-            return 50.0
-
-
-    def _calculate_liquidity_score(self, ticks_df: pd.DataFrame) -> float:
-        """
-        Analyser la liquidité (pressure ratio, continuité).
-
-        Score basé sur :
-        - Buy/Sell pressure ratio
-        - Continuité (absence de gaps)
-        - Volume stability
-
-        Returns:
-            Score 0-100
-        """
-        if ticks_df is None or ticks_df.empty or len(ticks_df) < 10:
-            return 50.0
-
-        try:
-            # 1. Buy/Sell pressure ratio
-            if 'flags' in ticks_df.columns:
-                # MT5 flags: 2=buy, 1=sell
-                buy_ticks = (ticks_df['flags'] == 2).sum()
-                sell_ticks = (ticks_df['flags'] == 1).sum()
-
-                if sell_ticks > 0:
-                    pressure_ratio = buy_ticks / sell_ticks
-                    # Ratio équilibré (0.8-1.2) = score élevé
-                    # Ratio déséquilibré = score bas (manque liquidité)
-                    if 0.8 <= pressure_ratio <= 1.2:
-                        pressure_score = 100.0
-                    else:
-                        # Distance de l'équilibre
-                        deviation = abs(pressure_ratio - 1.0)
-                        pressure_score = max(0.0, 100.0 - (deviation * 50.0))
-                else:
-                    pressure_score = 50.0
-            else:
-                pressure_score = 50.0
-
-            # 2. Continuité (gaps entre ticks)
-            if 'time' in ticks_df.columns:
-                ticks_df_sorted = ticks_df.sort_values('time')
-                time_diffs = ticks_df_sorted['time'].diff().dt.total_seconds()
-
-                # Gaps > 1 seconde = manque de liquidité
-                gaps = (time_diffs > 1.0).sum()
-                gap_pct = (gaps / len(ticks_df)) * 100.0
-
-                # Moins de gaps = meilleur score
-                continuity_score = max(0.0, 100.0 - gap_pct)
-            else:
-                continuity_score = 50.0
-
-            # 3. Volume stability
-            if 'volume' in ticks_df.columns:
-                vol_std = ticks_df['volume'].std()
-                vol_mean = ticks_df['volume'].mean()
-
-                if vol_mean > 0:
-                    cv = vol_std / vol_mean  # Coefficient of variation
-                    # CV faible = stable = bonne liquidité
-                    stability_score = max(0.0, 100.0 - (cv * 100.0))
-                else:
-                    stability_score = 50.0
-            else:
-                stability_score = 50.0
-
-            # Score final : moyenne pondérée
-            liquidity_score = (
-                pressure_score * 0.4 +      # Pressure ratio = 40%
-                continuity_score * 0.4 +    # Continuité = 40%
-                stability_score * 0.2       # Volume stability = 20%
-            )
-
-            return round(liquidity_score, 2)
-
-        except Exception as e:
-            logger.error(f"[LIQUIDITY] Erreur calcul: {e}", exc_info=True)
-            return 50.0
-
-
-    def _calculate_divergence_score(self, ticks_df: pd.DataFrame, candles_df: pd.DataFrame) -> float:
-        """
-        Détecter divergences price/delta.
-
-        Score basé sur :
-        - Divergence entre direction price et delta
-        - Force de la divergence
-
-        Returns:
-            Score 0-100 (50=pas de divergence, >50=divergence haussière, <50=baissière)
-        """
-        if ticks_df is None or ticks_df.empty or candles_df is None or len(candles_df) < 5:
-            return 50.0
-
-        try:
-            # 1. Direction du prix (dernières 5 bougies)
-            last_5 = candles_df.tail(5)
-            price_change = last_5['close'].iloc[-1] - last_5['close'].iloc[0]
-            price_direction = 1 if price_change > 0 else -1 if price_change < 0 else 0
-
-            # 2. Direction du delta (buy - sell volume)
-            if 'flags' in ticks_df.columns and 'volume' in ticks_df.columns:
-                buy_vol = ticks_df[ticks_df['flags'] == 2]['volume'].sum()
-                sell_vol = ticks_df[ticks_df['flags'] == 1]['volume'].sum()
-                delta = buy_vol - sell_vol
-                delta_direction = 1 if delta > 0 else -1 if delta < 0 else 0
-            else:
-                return 50.0
-
-            # 3. Détecter divergence
-            if price_direction == 0 or delta_direction == 0:
-                return 50.0  # Pas de divergence claire
-
-            # Divergence = directions opposées
-            is_divergent = (price_direction != delta_direction)
-
-            if is_divergent:
-                # Divergence haussière : price down, delta up → score > 50
-                # Divergence baissière : price up, delta down → score < 50
-                if delta_direction > 0:
-                    # Delta haussier, price baissier → signal BUY potentiel
-                    divergence_score = 75.0
-                else:
-                    # Delta baissier, price haussier → signal SELL potentiel
-                    divergence_score = 25.0
-            else:
-                # Pas de divergence → neutre
-                divergence_score = 50.0
-
-            return round(divergence_score, 2)
-
-        except Exception as e:
-            logger.error(f"[DIVERGENCE] Erreur calcul: {e}", exc_info=True)
-            return 50.0
-
-
-    def _calculate_smart_money_score(self, ticks_df: pd.DataFrame) -> float:
-        """
-        Détecter empreinte smart money (large ticks, absorption).
-
-        Score basé sur :
-        - Présence de large ticks (>3x moyenne)
-        - Absorption patterns (large volume sans mouvement prix)
-
-        Returns:
-            Score 0-100
-        """
-        if ticks_df is None or ticks_df.empty or len(ticks_df) < 10:
-            return 50.0
-
-        try:
-            # 1. Large ticks (>3x volume moyen)
-            if 'volume' in ticks_df.columns:
-                vol_mean = ticks_df['volume'].mean()
-                large_ticks = (ticks_df['volume'] > vol_mean * 3.0).sum()
-                large_tick_pct = (large_ticks / len(ticks_df)) * 100.0
-
-                # Plus de large ticks = plus d'activité institutionnelle
-                large_tick_score = min(100.0, large_tick_pct * 10.0)
-            else:
-                large_tick_score = 50.0
-
-            # 2. Absorption patterns (gros volume, petit mouvement)
-            if 'volume' in ticks_df.columns and 'bid' in ticks_df.columns and 'ask' in ticks_df.columns:
-                ticks_df['mid'] = (ticks_df['bid'] + ticks_df['ask']) / 2.0
-
-                # Diviser en segments de 10 ticks
-                absorption_count = 0
-                for i in range(0, len(ticks_df) - 10, 10):
-                    segment = ticks_df.iloc[i:i+10]
-                    total_vol = segment['volume'].sum()
-                    price_range = segment['mid'].max() - segment['mid'].min()
-
-                    # Absorption : gros volume (>80% du max) mais faible mouvement (<0.0002)
-                    max_vol = ticks_df['volume'].max() * 10  # 10 ticks
-                    if total_vol > max_vol * 0.5 and price_range < 0.0002:
-                        absorption_count += 1
-
-                # Score absorption
-                if len(ticks_df) >= 10:
-                    absorption_pct = (absorption_count / (len(ticks_df) // 10)) * 100.0
-                    absorption_score = min(100.0, absorption_pct * 5.0)
-                else:
-                    absorption_score = 50.0
-            else:
-                absorption_score = 50.0
-
-            # Score final : moyenne
-            smart_money_score = (large_tick_score + absorption_score) / 2.0
-
-            return round(smart_money_score, 2)
-
-        except Exception as e:
-            logger.error(f"[SMART_MONEY] Erreur calcul: {e}", exc_info=True)
-            return 50.0
-
-
-    def _calculate_institutional_score(self, institutional_analysis: Dict[str, Any]) -> float:
-        """
-        🆕 06 JAN 2026 PHASE 3: Agréger les 5 analyseurs institutionnels en score 0-100.
-
-        Les 5 analyseurs:
-        1. Price Memory → Qualité des niveaux mémoire
-        2. Market Fatigue → État d'épuisement du marché
-        3. Market Physics → Bias physique (inertie, momentum)
-        4. Microstructure (Tape Speed) → Vitesse et ignition
-        5. Liquidity Heatmap (Pressure) → Pression buy/sell
-
-        Args:
-            institutional_analysis: Dict contenant les 5 analyses
-
-        Returns:
-            Score 0-100 (0=bearish fort, 50=neutre, 100=bullish fort)
-        """
-        if not institutional_analysis:
-            return 50.0  # Neutre si pas de données
-
-        try:
-            scores = []
-            weights = []
-
-            # 1. PRICE MEMORY (20%) - Niveaux frais vs memory signals
-            price_memory = institutional_analysis.get('price_memory', {})
-            memory_signals = price_memory.get('memory_signals', [])
-            fresh_levels = price_memory.get('fresh_levels', [])
-
-            if memory_signals or fresh_levels:
-                # Plus de niveaux frais = bullish (opportunité), plus de memory = résistance
-                fresh_ratio = len(fresh_levels) / max(1, len(memory_signals) + len(fresh_levels))
-                memory_score = 50.0 + (fresh_ratio - 0.5) * 50.0  # 0→25, 0.5→50, 1→75
-                scores.append(memory_score)
-                weights.append(0.20)
-                logger.info(f"[INST_SCORE] PriceMemory: {memory_score:.1f} (fresh={len(fresh_levels)}, memory={len(memory_signals)})")
-
-            # 2. MARKET FATIGUE (25%) - État du marché
-            market_fatigue = institutional_analysis.get('market_fatigue', {})
-            fatigue_state = str(market_fatigue.get('market_state', 'UNKNOWN')).upper()
-            fatigue_score_raw = float(market_fatigue.get('fatigue_score', 5.0))  # 0-10
-
-            # 06 JAN 2026 FIX: États réels retournés par MarketFatigueAnalyzer
-            # 'EXHAUSTED' (>=7), 'FATIGUED' (>=4), 'NORMAL' (>=2), 'ENERGETIC' (<2)
-            if fatigue_state != 'UNKNOWN':
-                # Fatigue high = bearish (épuisement), fatigue low = bullish (énergie)
-                fatigue_score = 50.0 + (5.0 - fatigue_score_raw) * 5.0  # 10→0, 5→50, 0→100
-
-                # Ajustement par état (06 JAN 2026: utiliser vrais états)
-                if fatigue_state == 'EXHAUSTED':
-                    # Marché épuisé → probable reversal → bearish (contre le mouvement actuel)
-                    fatigue_score = 30.0
-                elif fatigue_state == 'FATIGUED':
-                    # Marché fatigué → affaiblissement
-                    fatigue_score = 40.0
-                elif fatigue_state == 'NORMAL':
-                    # Marché sain → neutre
-                    fatigue_score = 50.0
-                elif fatigue_state == 'ENERGETIC':
-                    # Marché énergique → continuation probable → bullish
-                    fatigue_score = 65.0
-
-                scores.append(fatigue_score)
-                weights.append(0.25)
-                logger.info(f"[INST_SCORE] MarketFatigue: {fatigue_score:.1f} (state={fatigue_state}, raw={fatigue_score_raw:.1f}/10)")
-
-            # 3. MARKET PHYSICS (25%) - Bias physique
-            market_physics = institutional_analysis.get('market_physics', {})
-            physics_bias = str(market_physics.get('physics_bias', 'NEUTRAL')).upper()
-            price_inertia = market_physics.get('price_inertia', {})
-            inertia_dir = str(price_inertia.get('direction', 'NEUTRAL')).upper()
-
-            # 06 JAN 2026 FIX: MarketPhysicsAnalyzer retourne 'UP'/'DOWN', pas 'UPWARD'/'DOWNWARD'
-            if physics_bias != 'UNKNOWN':
-                # Convertir bias en score
-                if 'BULLISH' in physics_bias or 'BUY' in physics_bias:
-                    physics_score = 75.0
-                elif 'BEARISH' in physics_bias or 'SELL' in physics_bias:
-                    physics_score = 25.0
-                else:
-                    physics_score = 50.0
-
-                # Boost si inertie alignée (06 JAN 2026: accepter 'UP'/'DOWN')
-                if inertia_dir == 'UP' or inertia_dir == 'UPWARD':
-                    physics_score = min(100.0, physics_score + 10.0)
-                elif inertia_dir == 'DOWN' or inertia_dir == 'DOWNWARD':
-                    physics_score = max(0.0, physics_score - 10.0)
-
-                scores.append(physics_score)
-                weights.append(0.25)
-                logger.info(f"[INST_SCORE] MarketPhysics: {physics_score:.1f} (bias={physics_bias}, inertia={inertia_dir})")
-
-            # 4. TAPE SPEED (15%) - Vitesse du tape
-            tape_speed = institutional_analysis.get('tape_speed', {})
-            speed_ratio = float(tape_speed.get('speed_ratio', 1.0))
-            speed_interp = str(tape_speed.get('interpretation', 'NORMAL')).upper()
-
-            if speed_ratio > 0:
-                # Speed élevé = activité (neutre à bullish), speed faible = apathie (bearish)
-                if speed_ratio >= 2.0:
-                    tape_score = 70.0  # Haute activité
-                elif speed_ratio >= 1.5:
-                    tape_score = 60.0
-                elif speed_ratio >= 0.8:
-                    tape_score = 50.0  # Normal
-                else:
-                    tape_score = 35.0  # Apathie
-
-                scores.append(tape_score)
-                weights.append(0.15)
-                logger.info(f"[INST_SCORE] TapeSpeed: {tape_score:.1f} (ratio={speed_ratio:.2f}, interp={speed_interp})")
-
-            # 5. PRESSURE RATIO (15%) - Pression buy/sell
-            pressure_ratio = institutional_analysis.get('pressure_ratio', {})
-            pressure_dir = str(pressure_ratio.get('direction', 'NEUTRAL')).upper()
-            pressure_norm = float(pressure_ratio.get('normalized_pressure', 0.0))  # -1 à +1
-
-            if pressure_dir != 'UNKNOWN':
-                # Convertir pression en score
-                pressure_score = 50.0 + (pressure_norm * 50.0)  # -1→0, 0→50, +1→100
-
-                scores.append(pressure_score)
-                weights.append(0.15)
-                logger.info(f"[INST_SCORE] Pressure: {pressure_score:.1f} (dir={pressure_dir}, norm={pressure_norm:.2f})")
-
-            # Calcul final pondéré
-            if scores:
-                total_weight = sum(weights)
-                institutional_score = sum(s * w for s, w in zip(scores, weights)) / total_weight
-                institutional_score = max(0.0, min(100.0, institutional_score))
-
-                logger.info(
-                    f"[INST_SCORE] ✅ Score Institutionnel={institutional_score:.1f}/100 "
-                    f"({len(scores)}/5 analyseurs actifs)"
-                )
-                return round(institutional_score, 2)
-            else:
-                logger.warning("[INST_SCORE] Aucun analyseur actif, score neutre 50.0")
-                return 50.0
-
-        except Exception as e:
-            logger.error(f"[INST_SCORE] Erreur calcul: {e}", exc_info=True)
-            return 50.0
-
-
-    def _determine_decision(self, composite_score: float, components: Dict[str, float]) -> tuple:
-        """
-        Déterminer la décision (BUY/SELL/HOLD) et le niveau de confiance.
-
-        Args:
-            composite_score: Score composite 0-100
-            components: Scores individuels des composants
-
-        Returns:
-            (decision, confidence)
-        """
-        # 🔧 FIX BUG #3 (05 JAN 2026): Utiliser seuils configurables depuis self.thresholds
-        STRONG_THRESHOLD = self.thresholds['STRONG_THRESHOLD']
-        GOOD_THRESHOLD = self.thresholds['GOOD_THRESHOLD']
-        WEAK_THRESHOLD = self.thresholds['WEAK_THRESHOLD']
-        NEUTRAL_LOW = self.thresholds['NEUTRAL_LOW']
-        NEUTRAL_HIGH = self.thresholds['NEUTRAL_HIGH']
-
-        # Déterminer direction
-        if composite_score >= NEUTRAL_HIGH:
+                duration = (ticks_df['time'].max() - ticks_df['time'].min())
+                if hasattr(duration, 'total_seconds'):
+                    duration = duration.total_seconds()
+                if duration > 0:
+                    tape_speed = len(ticks_df) / duration
+                    speed_score = min(100.0, (tape_speed / 5.0) * 100.0)
+                    scores.append(speed_score)
+        except:
+            pass
+
+    if scores:
+        return sum(scores) / len(scores)
+    return 50.0
+
+
+def _calculate_context_component(
+    candidate: Dict[str, Any],
+    asset_signals: Dict[str, Any]
+) -> float:
+    """Calcule le score Context (phase, alignment, confidence)."""
+    phase = str(asset_signals.get("phase", "") or "").lower()
+    conf = float(asset_signals.get("confidence_score", 0.5) or 0.5)
+    action = candidate.get("action", "")
+
+    # Alignment
+    align = 0.5
+    if action == "BUY" and any(k in phase for k in ("bull", "up", "accum", "trend")):
+        align = 1.0
+    elif action == "SELL" and any(k in phase for k in ("bear", "down", "distrib")):
+        align = 1.0
+    elif action == "SELL" and "trend" in phase:
+        align = 0.8
+
+    # Score 0-100
+    context_score = (0.5 * conf + 0.5 * align) * 100.0
+    return max(0.0, min(100.0, context_score))
+
+
+def _calculate_technical_component(
+    candidate: Dict[str, Any],
+    patterns: Dict[str, Any]
+) -> float:
+    """Calcule le score Technical (setup score, patterns)."""
+    # Technical score du candidat
+    tech = candidate.get("technical_score")
+    if tech is None:
+        tech = candidate.get("confidence", 0.6)
+    try:
+        tech_score = float(tech) * 100.0
+    except:
+        tech_score = 60.0
+
+    # Pattern bonus
+    pattern_count = 0
+    if isinstance(patterns, dict):
+        pattern_count = sum(1 for v in patterns.values() if bool(v))
+    elif isinstance(patterns, list):
+        pattern_count = len(patterns)
+
+    pattern_bonus = min(20.0, pattern_count * 5.0)
+
+    return max(0.0, min(100.0, tech_score + pattern_bonus))
+
+
+def _calculate_risk_component(meta: Dict[str, Any]) -> float:
+    """Calcule le score Risk (spread, volatility)."""
+    sp = float(meta.get("spread_pips", 0.0) or 0.0)
+
+    if sp <= 5:
+        risk_score = 100.0
+    elif sp <= 10:
+        risk_score = 80.0
+    elif sp <= 15:
+        risk_score = 60.0
+    else:
+        risk_score = 30.0
+
+    return risk_score
+
+
+def _determine_decision(
+    final_score: float,
+    components: Dict[str, float],
+    candidate: Dict[str, Any]
+) -> Tuple[str, str]:
+    """Determine decision (BUY/SELL/HOLD) et confidence."""
+    action = candidate.get("action", "")
+
+    # Confidence
+    if final_score >= 75:
+        confidence = "STRONG"
+    elif final_score >= 65:
+        confidence = "GOOD"
+    elif final_score >= 55:
+        confidence = "WEAK"
+    else:
+        confidence = "NONE"
+
+    # Decision
+    if confidence == "NONE":
+        decision = "HOLD"
+    elif action in ("BUY", "SELL"):
+        decision = action
+    else:
+        # Infer from orderflow
+        of_score = components.get('orderflow', 50)
+        if of_score >= 60:
             decision = "BUY"
-        elif composite_score <= NEUTRAL_LOW:
+        elif of_score <= 40:
             decision = "SELL"
         else:
             decision = "HOLD"
 
-        # Déterminer confiance
-        if decision == "HOLD":
-            confidence = "NONE"
-        elif composite_score >= STRONG_THRESHOLD or composite_score <= (100.0 - STRONG_THRESHOLD):
-            confidence = "STRONG"
-        elif composite_score >= GOOD_THRESHOLD or composite_score <= (100.0 - GOOD_THRESHOLD):
-            confidence = "GOOD"
-        elif composite_score >= WEAK_THRESHOLD or composite_score <= (100.0 - WEAK_THRESHOLD):
-            confidence = "WEAK"
-        else:
-            confidence = "NONE"
-
-        return decision, confidence
+    return decision, confidence
 
 
-    def _default_result(self, reason: str = "UNKNOWN") -> Dict[str, Any]:
-        """
-        Résultat par défaut en cas d'erreur.
-        """
-        return {
-            'composite_score': 50.0,
-            'components': {
-                'orderflow': 50.0,
-                'microstructure': 50.0,
-                'liquidity': 50.0,
-                'divergence': 50.0,
-                'smart_money': 50.0
-            },
-            'decision': 'HOLD',
-            'confidence': 'NONE',
-            'details': {
-                'error': reason,
-                'weights': self.weights
-            }
-        }
+# ============================================================================
+# FONCTION LEGACY (compatibilite avec orderflow_v6.py)
+# ============================================================================
 
-
-def test_scorer():
+def calculate_score_integrated(
+    metrics: Dict[str, float],
+    patterns,
+    rescue_level: int,
+    rescue_note: str,
+    footprint_data: Optional[Dict[str, Any]] = None,
+    scoring_weights: Optional[Dict[str, float]] = None,
+    current_regime: Optional[str] = None,
+) -> Tuple[float, str, Dict[str, Any]]:
     """
-    Test rapide du scorer avec données simulées.
+    Legacy wrapper pour compatibilite avec orderflow_v6.py.
+    Redirige vers calculate_unified_score.
     """
-    print("\n" + "="*60)
-    print("TEST SimpleAdvancedScorer")
-    print("="*60)
+    result = calculate_unified_score(
+        metrics=metrics,
+        patterns=patterns if isinstance(patterns, dict) else {},
+        footprint_data=footprint_data,
+        current_regime=current_regime,
+        rescue_level=rescue_level
+    )
 
-    # Créer scorer avec poids par défaut
-    scorer = SimpleAdvancedScorer()
-
-    # Données simulées
-    ticks_data = {
-        'time': pd.date_range('2026-01-03 10:00:00', periods=100, freq='100ms'),
-        'bid': np.random.uniform(1.0850, 1.0855, 100),
-        'ask': np.random.uniform(1.0851, 1.0856, 100),
-        'volume': np.random.randint(1, 10, 100),
-        'flags': np.random.choice([1, 2], 100)  # 1=sell, 2=buy
+    # Format legacy
+    summary = {
+        "orderflow_score": result['components']['orderflow'],
+        "final_score": result['final_score'],
+        "status": result['status'],
+        "components": result['components'],
+        "detected_regime": current_regime,
+        "rescue_level": rescue_level,
+        "rescue_kind": "none" if rescue_level == 0 else ("soft" if rescue_level == 1 else "hard"),
+        "bias": result['decision'],
     }
-    ticks_df = pd.DataFrame(ticks_data)
 
-    candles_data = {
-        'time': pd.date_range('2026-01-03 10:00:00', periods=20, freq='1min'),
-        'open': np.random.uniform(1.0850, 1.0855, 20),
-        'high': np.random.uniform(1.0855, 1.0860, 20),
-        'low': np.random.uniform(1.0845, 1.0850, 20),
-        'close': np.random.uniform(1.0850, 1.0855, 20),
-        'volume': np.random.randint(100, 500, 20)
-    }
-    candles_df = pd.DataFrame(candles_data)
+    return result['final_score'], result['status'], summary
 
-    # Test avec différents scores OrderFlow
-    for of_score in [30.0, 50.0, 70.0, 90.0]:
-        print(f"\n--- Test OrderFlow Score = {of_score} ---")
-        result = scorer.calculate_composite_score(
+
+# ============================================================================
+# CLASSE WRAPPER (compatibilite avec run_bot.py)
+# ============================================================================
+
+class SimpleAdvancedScorer:
+    """Wrapper classe pour compatibilite avec run_bot.py."""
+
+    def __init__(self, config=None, thresholds=None):
+        self.weights = config or {}
+        self.thresholds = thresholds or {}
+
+    def calculate_composite_score(
+        self,
+        ticks_df=None,
+        candles_df=None,
+        orderflow_score=0.0,
+        institutional_analysis=None
+    ):
+        """Redirige vers calculate_unified_score."""
+        result = calculate_unified_score(
             ticks_df=ticks_df,
             candles_df=candles_df,
-            orderflow_score=of_score
+            institutional_analysis=institutional_analysis,
+            weights=self.weights
         )
+        # Ajouter orderflow_score si fourni
+        if orderflow_score > 0:
+            result['components']['orderflow'] = orderflow_score
 
-        print(f"Composite Score: {result['composite_score']:.1f}/100")
-        print(f"Decision: {result['decision']} ({result['confidence']})")
-        print(f"Components: {result['components']}")
+        return result
 
-    print("\n" + "="*60)
-    print("TEST TERMINÉ")
-    print("="*60 + "\n")
 
+# ============================================================================
+# TEST
+# ============================================================================
 
 if __name__ == "__main__":
-    # Test si exécuté directement
-    test_scorer()
+    print("Test calculate_unified_score:")
+    result = calculate_unified_score(
+        metrics={'delta_total': 100, 'total_volume': 1000, 'imbalance_mean': 0.6},
+        candidate={'action': 'BUY', 'technical_score': 0.7},
+        meta={'spread_pips': 3}
+    )
+    print(f"  Score: {result['final_score']}/100")
+    print(f"  Status: {result['status']}")
+    print(f"  Decision: {result['decision']} ({result['confidence']})")
+    print(f"  Components: {result['components']}")
