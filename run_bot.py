@@ -26,23 +26,14 @@ from typing import Any, Dict, Optional, List, Tuple
 from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
-# ❌ SUPPRIMÉ (25 DEC 2025): FusionManager, VWAP - Architecture minimaliste OrderFlow seul
-# from phase_observer.fusion_manager import FusionManager
-# from phase_observer.vwap import create_vwap_analyzer
-# ✅ AJOUTÉ (25 DEC 2025): Timing Gatekeeper pour filtrage binaire PASS/VETO
 from phase_observer.timing_analyzer import evaluate_trading_conditions
-# ✅ AJOUTÉ (03 JAN 2026): SimpleAdvancedScorer pour scoring composite évolutif
 from strategy.advanced_scoring import SimpleAdvancedScorer
 
 
 load_dotenv()
 
 try:
-    # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
-    # detect_orderflow_v6 supprimé → analyse intégrée dans ScalpingStrategy
-    # from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
-    # ❌ SUPPRIMÉ (25 DEC 2025): footprint_validator - Non utilisé dans pipeline minimaliste
-    # from phase_observer.detectors import footprint_validator
+  
     from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
     from core.decision_pipeline import DecisionPipeline
@@ -3234,6 +3225,17 @@ def scalping_worker(
                 logger.warning(f"[{asset}] ⚠️ Vérification symbol failed: {e_symbol}")
                 # Continue quand même (ne pas bloquer le cycle)
 
+            # 🔧 FIX (25 JAN 2026): Définir point et digits depuis symbol_info
+            point = getattr(symbol_info, "point", 0.00001) if symbol_info else 0.00001
+            digits = getattr(symbol_info, "digits", 5) if symbol_info else 5
+
+            # 🔧 FIX (25 JAN 2026): Charger asset_cfg pour momentum_filter
+            try:
+                asset_cfg = config_manager.config_loader.load_asset_config(asset) or {}
+            except Exception as e_asset_cfg:
+                logger.warning(f"[{asset}] ⚠️ Erreur chargement asset config: {e_asset_cfg}")
+                asset_cfg = {}
+
             # ✅ PHASE 2: Import cache multi-niveaux
             from core.bars_cache import bars_cache
             from phase_observer.regime_resolver import regime_resolver
@@ -3256,6 +3258,34 @@ def scalping_worker(
                 })
                 time.sleep(cycle_interval)
                 continue
+
+            # ═══════════════════════════════════════════════════════════════
+            # 🆕 25 JAN 2026: CHARGEMENT M5 et M15 pour analyse MTF
+            # Permet verdict multi-timeframe (M15 + M5 + M1)
+            # ═══════════════════════════════════════════════════════════════
+            rates_df_m5 = None
+            rates_df_m15 = None
+            try:
+                rates_df_m5 = bars_cache.get_or_fetch(
+                    symbol=asset,
+                    timeframe="M5",
+                    count=20,  # 20 bougies M5 = 100 minutes d'historique
+                    mt5_connector=mt5_connector,
+                    ttl_seconds=60.0,
+                )
+                rates_df_m15 = bars_cache.get_or_fetch(
+                    symbol=asset,
+                    timeframe="M15",
+                    count=10,  # 10 bougies M15 = 150 minutes d'historique
+                    mt5_connector=mt5_connector,
+                    ttl_seconds=60.0,
+                )
+                if rates_df_m5 is not None and rates_df_m15 is not None:
+                    logger.debug(f"[{asset}] ✅ MTF data loaded: M5={len(rates_df_m5)} bars, M15={len(rates_df_m15)} bars")
+            except Exception as e_mtf_load:
+                logger.warning(f"[{asset}] ⚠️ Erreur chargement M5/M15 pour MTF: {e_mtf_load}")
+                rates_df_m5 = None
+                rates_df_m15 = None
 
             # 🎯 (05 JAN 2026): FENÊTRE GLISSANTE pour scalping sniper
             # Fix: Fenêtre M1 (60s) → scores identiques pendant 24 cycles
@@ -3548,12 +3578,13 @@ def scalping_worker(
                 # 🧠 PRICE MEMORY TREND ANALYSIS (08 JAN 2026)
                 # Détecte la tendance historique sur 15 bougies M1 (réactivité micro-tendances)
                 # ═══════════════════════════════════════════════════════════════
+                # 🔧 25 JAN 2026: Définir current_price avant le bloc try pour éviter UnboundLocalError
+                latest_candle_for_memory = market_results.get("latest", {})
+                current_price = latest_candle_for_memory.get('close', 0.0) if latest_candle_for_memory else 0.0
+
                 try:
                     # Vérifier que l'analyseur est disponible
                     if price_memory_analyzer is not None:
-                        # Analyser la structure de tendance
-                        latest_candle_for_memory = market_results.get("latest", {})
-                        current_price = latest_candle_for_memory.get('close', 0.0) if latest_candle_for_memory else 0.0
 
                         # 🔧 08 JAN 2026: Utiliser seulement les 15 dernières bougies (au lieu de 50)
                         # Raison: 50 bougies dilue les micro-tendances (4 bougies +12 pips → NET +1 pip)
@@ -3596,6 +3627,73 @@ def scalping_worker(
                     memory_net_pips = 0.0
                     memory_net_direction = "FLAT"
                     memory_clarity = 0.0
+
+                # ═══════════════════════════════════════════════════════════════
+                # 🆕 25 JAN 2026: MTF TREND VERDICT (M15 + M5 + M1)
+                # Analyse multi-timeframe pour direction et bonus
+                # ═══════════════════════════════════════════════════════════════
+                mtf_verdict = None
+                mtf_bonus = 0.0
+                mtf_direction = "NEUTRAL"
+                try:
+                    if price_memory_analyzer is not None:
+                        mtf_verdict = price_memory_analyzer.get_mtf_trend_verdict(
+                            asset=asset,
+                            candles_m15=rates_df_m15,
+                            candles_m5=rates_df_m5,
+                            candles_m1=rates_df_fresh,
+                            current_price=current_price
+                        )
+                        mtf_bonus = mtf_verdict.bonus
+                        mtf_direction = mtf_verdict.direction
+
+                        # Emoji selon direction
+                        mtf_emoji = "🐻" if mtf_direction == "BEARISH" else ("🐂" if mtf_direction == "BULLISH" else "⚖️")
+
+                        logger.info(
+                            f"{mtf_emoji} [MTF_VERDICT][{asset}] {mtf_direction} ({mtf_verdict.alignment}) | "
+                            f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
+                            f"Bonus: {mtf_bonus:+.0f} pts | Confidence: {mtf_verdict.confidence:.2f}"
+                        )
+                    else:
+                        logger.debug(f"[{asset}] PriceMemoryAnalyzer non disponible pour MTF")
+
+                except Exception as e_mtf_verdict:
+                    logger.error(f"[{asset}] Erreur MTF verdict: {e_mtf_verdict}", exc_info=True)
+                    mtf_verdict = None
+                    mtf_bonus = 0.0
+                    mtf_direction = "NEUTRAL"
+
+                # ═══════════════════════════════════════════════════════════════
+                # 🆕 25 JAN 2026: MICRO-RÉSISTANCES M1 (Scalping)
+                # Détecte les niveaux de résistance proches pour éviter trades BUY contre résistance
+                # ═══════════════════════════════════════════════════════════════
+                micro_resistance = None
+                micro_resistance_info = {
+                    'micro_resistance': None,
+                    'distance_pips': 0.0,
+                    'bounce_probability': 0.0,
+                    'strength': 'NONE'
+                }
+                try:
+                    if price_memory_analyzer is not None and rates_df_fresh is not None:
+                        micro_resistance_info = price_memory_analyzer.detect_micro_resistance_m1(
+                            historical_data=rates_df_fresh,
+                            current_price=current_price,
+                            lookback_minutes=15
+                        )
+                        micro_resistance = micro_resistance_info.get('micro_resistance')
+
+                        if micro_resistance and micro_resistance_info.get('strength') in ['STRONG', 'MODERATE']:
+                            logger.info(
+                                f"🚧 [MICRO_RESISTANCE][{asset}] Niveau: {micro_resistance:.5f} | "
+                                f"Distance: {micro_resistance_info['distance_pips']:.2f} pips | "
+                                f"Bounce prob: {micro_resistance_info['bounce_probability']:.0%} | "
+                                f"Strength: {micro_resistance_info['strength']}"
+                            )
+
+                except Exception as e_micro_res:
+                    logger.debug(f"[{asset}] Erreur micro-résistance: {e_micro_res}")
 
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
@@ -3646,7 +3744,11 @@ def scalping_worker(
                 # ========== ÉTAPE 3: DÉCISION INTELLIGENTE (02 JAN 2026 - Veto pondéré) ==========
                 # Système intelligent : Signal OrderFlow fort peut passer outre veto modéré
                 veto_score = timing_verdict.get("veto_score", 0.0) if timing_verdict else 0.0
-                orderflow_score = orderflow_result_mini['score']
+                orderflow_score_raw = orderflow_result_mini['score']
+
+                # ═══════════════════════════════════════════════════════════════
+                # Score OrderFlow brut (le PMA ajustera ce score plus tard en post-processing)
+                orderflow_score = orderflow_score_raw
 
                 # 🎯 LOGIQUE INTELLIGENTE (02 JAN 2026)
                 # Signal exceptionnel (≥85) peut passer outre veto modéré (< 60)
@@ -4025,6 +4127,168 @@ def scalping_worker(
                             logger.error(f"[TRIPLE_FILTER][{asset}] Erreur: {e_triple_filter}", exc_info=True)
                             # En cas d'erreur, garder la décision OrderFlow originale
 
+                        # ═══════════════════════════════════════════════════════════════
+                        # 🧠 25 JAN 2026: PRICE MEMORY ANALYZER - POST-PROCESSING
+                        # Système de Bonus/Malus indépendant (architecture "Beside")
+                        # Score_Final = Score_Unifié + Σ Bonus - Σ Malus
+                        # ═══════════════════════════════════════════════════════════════
+                        pma_bonus = 0.0
+                        pma_malus = 0.0
+                        pma_adjustments = []
+                        pma_veto_dur = False
+
+                        try:
+                            # Récupérer le signal actuel (BUY/SELL/HOLD)
+                            signal_action = decision_mini.get("action", "HOLD")
+                            signal_bias = orderflow_result_mini.get("bias", "NEUTRAL")
+
+                            # ══════════════════════════════════════════════════════
+                            # 📉 CALCUL DES MALUS (Risque & Veto)
+                            # ══════════════════════════════════════════════════════
+
+                            # MALUS 1: Micro-Résistance M1 (-30 pts)
+                            # Condition: Prix < 1 pip d'une résistance + Signal BUY
+                            if (signal_action == "BUY" and
+                                micro_resistance_info.get('strength') in ['STRONG', 'MODERATE'] and
+                                micro_resistance_info.get('distance_pips', 999) < 1.0 and
+                                micro_resistance_info.get('bounce_probability', 0) >= 0.7):
+                                pma_malus += 30.0
+                                pma_adjustments.append(
+                                    f"MALUS_MICRO_RES: -30 (Résistance {micro_resistance_info['strength']} à {micro_resistance_info['distance_pips']:.2f} pips)"
+                                )
+
+                            # MALUS 2: Contre-Tendance MTF (-35 pts)
+                            # Condition: MTF BEARISH mais Signal BUY (ou inverse)
+                            if mtf_verdict is not None and mtf_verdict.alignment_count >= 2:
+                                if mtf_direction == "BEARISH" and signal_action == "BUY":
+                                    pma_malus += 35.0
+                                    pma_adjustments.append(
+                                        f"MALUS_CONTRE_MTF: -35 (MTF {mtf_verdict.alignment} BEARISH vs Signal BUY)"
+                                    )
+                                elif mtf_direction == "BULLISH" and signal_action == "SELL":
+                                    pma_malus += 35.0
+                                    pma_adjustments.append(
+                                        f"MALUS_CONTRE_MTF: -35 (MTF {mtf_verdict.alignment} BULLISH vs Signal SELL)"
+                                    )
+
+                            # MALUS 3: Zone Range/Accumulation (-20 pts)
+                            # Condition: Régime = range/accumulation et signal directionnel
+                            current_regime_lower = str(current_regime).lower() if current_regime else "unknown"
+                            if any(rg in current_regime_lower for rg in ["range", "accumulation", "distribution"]):
+                                if signal_action in ["BUY", "SELL"]:
+                                    pma_malus += 20.0
+                                    pma_adjustments.append(
+                                        f"MALUS_REGIME: -20 (Régime '{current_regime}' incompatible avec {signal_action})"
+                                    )
+
+                            # ══════════════════════════════════════════════════════
+                            # 📈 CALCUL DES BONUS (Validation & Alignement)
+                            # ══════════════════════════════════════════════════════
+
+                            # BONUS 1: MTF Alignment 3/3 (+15 pts)
+                            # Condition: M15, M5, M1 tous alignés avec le signal
+                            if mtf_verdict is not None and mtf_verdict.alignment_count == 3:
+                                if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
+                                   (mtf_direction == "BEARISH" and signal_action == "SELL"):
+                                    pma_bonus += 15.0
+                                    pma_adjustments.append(
+                                        f"BONUS_MTF_3/3: +15 (Alignement parfait {mtf_direction} + {signal_action})"
+                                    )
+                            # BONUS 1b: MTF Alignment 2/3 (+10 pts)
+                            elif mtf_verdict is not None and mtf_verdict.alignment_count == 2:
+                                if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
+                                   (mtf_direction == "BEARISH" and signal_action == "SELL"):
+                                    pma_bonus += 10.0
+                                    pma_adjustments.append(
+                                        f"BONUS_MTF_2/3: +10 (Alignement {mtf_verdict.alignment} {mtf_direction} + {signal_action})"
+                                    )
+
+                            # BONUS 2: Niveaux Frais (+10 pts)
+                            # Condition: Prix sur niveau jamais testé récemment
+                            if price_memory_analyzer is not None:
+                                try:
+                                    fresh_levels = price_memory_analyzer.find_fresh_levels(
+                                        historical_data=rates_df_fresh,
+                                        current_price=current_price,
+                                        lookback=20
+                                    )
+                                    if fresh_levels and len(fresh_levels) > 0:
+                                        # Vérifier si le prix actuel est proche d'un niveau frais
+                                        for level in fresh_levels:
+                                            distance_pips = abs(current_price - level) * 10000
+                                            if distance_pips < 2.0:  # < 2 pips du niveau frais
+                                                pma_bonus += 10.0
+                                                pma_adjustments.append(
+                                                    f"BONUS_FRESH_LEVEL: +10 (Niveau frais à {distance_pips:.1f} pips)"
+                                                )
+                                                break
+                                except Exception:
+                                    pass
+
+                            # BONUS 3: Trend Consistency (+5 pts)
+                            # Condition: Tendance clairement définie (clarity > 0.7)
+                            if memory_clarity >= 0.7 and memory_trend_strength >= 0.6:
+                                if (memory_trend_direction == "BULLISH" and signal_action == "BUY") or \
+                                   (memory_trend_direction == "BEARISH" and signal_action == "SELL"):
+                                    pma_bonus += 5.0
+                                    pma_adjustments.append(
+                                        f"BONUS_TREND_CONSISTENCY: +5 (Clarity={memory_clarity:.2f}, Strength={memory_trend_strength:.2f})"
+                                    )
+
+                            # ══════════════════════════════════════════════════════
+                            # 🧮 CALCUL DU SCORE AJUSTÉ
+                            # ══════════════════════════════════════════════════════
+                            score_brut = orderflow_score  # Score avant ajustement PMA
+                            pma_adjustment_total = pma_bonus - pma_malus
+                            score_ajuste = score_brut + pma_adjustment_total
+
+                            # Stocker dans orderflow_result_mini pour traçabilité
+                            orderflow_result_mini['pma_bonus'] = pma_bonus
+                            orderflow_result_mini['pma_malus'] = pma_malus
+                            orderflow_result_mini['pma_adjustment'] = pma_adjustment_total
+                            orderflow_result_mini['pma_adjustments'] = pma_adjustments
+                            orderflow_result_mini['score_before_pma'] = score_brut
+                            orderflow_result_mini['score'] = score_ajuste
+
+                            # ══════════════════════════════════════════════════════
+                            # 🚫 RÈGLE DU VETO DUR
+                            # Si score ajusté < 60 → Trade rejeté
+                            # ══════════════════════════════════════════════════════
+                            VETO_DUR_THRESHOLD = 60.0
+
+                            if signal_action in ["BUY", "SELL"] and score_ajuste < VETO_DUR_THRESHOLD:
+                                pma_veto_dur = True
+                                old_action = decision_mini["action"]
+                                old_rationale = decision_mini.get("rationale", "")
+                                decision_mini["action"] = "HOLD"
+                                decision_mini["confidence"] = 0.0
+                                decision_mini["rationale"] = (
+                                    f"PMA_VETO_DUR: Score {score_ajuste:.1f} < {VETO_DUR_THRESHOLD} | "
+                                    f"Brut={score_brut:.1f} + Bonus={pma_bonus:.0f} - Malus={pma_malus:.0f} | "
+                                    f"Original: {old_action}"
+                                )
+
+                            # ══════════════════════════════════════════════════════
+                            # 📊 LOG DU RAPPORT PMA
+                            # ══════════════════════════════════════════════════════
+                            if pma_adjustment_total != 0 or pma_veto_dur:
+                                adj_emoji = "📈" if pma_adjustment_total > 0 else ("📉" if pma_adjustment_total < 0 else "⚖️")
+                                veto_str = " 🚫 VETO_DUR" if pma_veto_dur else ""
+
+                                logger.info(
+                                    f"{adj_emoji} [PMA_ADJUSTMENT][{asset}] "
+                                    f"Score: {score_brut:.1f} → {score_ajuste:.1f} "
+                                    f"(Bonus: +{pma_bonus:.0f}, Malus: -{pma_malus:.0f}){veto_str}"
+                                )
+                                for adj in pma_adjustments:
+                                    logger.debug(f"   └─ {adj}")
+                            else:
+                                # Règle de neutralité: pas d'ajustement
+                                logger.debug(f"[PMA_NEUTRAL][{asset}] Aucun ajustement (Score inchangé: {score_brut:.1f})")
+
+                        except Exception as e_pma:
+                            logger.error(f"[PMA_ADJUSTMENT][{asset}] Erreur: {e_pma}", exc_info=True)
+
                         # Construction fusion_out
                         if decision_mini["action"] in ["BUY", "SELL"]:
                             anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
@@ -4038,7 +4302,17 @@ def scalping_worker(
                                 "orderflow_score": orderflow_result_mini["score"],
                                 "timing_quality": timing_verdict.get("quality_metrics", {}),
                                 "price": anchor_price,
-                                "context": ctx
+                                "context": ctx,
+                                # 🆕 25 JAN 2026: Infos MTF et micro-résistance
+                                "mtf_verdict": {
+                                    "direction": mtf_direction,
+                                    "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
+                                    "bonus": mtf_bonus,
+                                    "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
+                                    "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
+                                    "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
+                                },
+                                "micro_resistance": micro_resistance_info
                             }
 
                             logger.info(
@@ -4135,7 +4409,7 @@ def scalping_worker(
                             logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
                             decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
-                        # Construction fusion_out
+                        # Construction fusion_out (BRANCHE 3: PASS_NORMAL)
                         if decision_mini["action"] in ["BUY", "SELL"]:
                             anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
 
@@ -4148,7 +4422,17 @@ def scalping_worker(
                                 "orderflow_score": orderflow_result_mini["score"],
                                 "timing_quality": timing_verdict.get("quality_metrics", {}),
                                 "price": anchor_price,
-                                "context": ctx
+                                "context": ctx,
+                                # 🆕 25 JAN 2026: Infos MTF et micro-résistance
+                                "mtf_verdict": {
+                                    "direction": mtf_direction,
+                                    "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
+                                    "bonus": mtf_bonus,
+                                    "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
+                                    "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
+                                    "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
+                                },
+                                "micro_resistance": micro_resistance_info
                             }
 
                             logger.info(
@@ -4778,9 +5062,7 @@ def main(args: argparse.Namespace) -> None:
         if not phase_observer or not hasattr(phase_observer, "lookback_window"):
             logger.critical("PhaseObserver non initialisé correctement -> arrêt.")
             sys.exit(1)
-
-        # Instancier AI Decision
-        
+     
         # Instancier TradeExecutor
         trade_executor = TradeExecutor(
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
