@@ -3162,6 +3162,16 @@ def scalping_worker(
         logger.error(f"❌ [{asset}] Impossible de créer PriceMemoryAnalyzer: {e}")
         price_memory_analyzer = None  # Continue sans Price Memory
 
+    # ✅ 25 JAN 2026: Instancier InstitutionalReversalDetector
+    # Responsable de: Wyckoff, ML Patterns, Divergences CVD, Changepoint
+    try:
+        from phase_observer.institutional_reversal_detector import InstitutionalReversalDetector
+        institutional_detector = InstitutionalReversalDetector(logger=logger)
+        logger.info(f"✅ [{asset}] InstitutionalReversalDetector instancié")
+    except Exception as e:
+        logger.error(f"❌ [{asset}] Impossible de créer InstitutionalReversalDetector: {e}")
+        institutional_detector = None
+
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
@@ -3695,6 +3705,61 @@ def scalping_worker(
                 except Exception as e_micro_res:
                     logger.debug(f"[{asset}] Erreur micro-résistance: {e_micro_res}")
 
+                # ═══════════════════════════════════════════════════════════════
+                # 🏛️ 25 JAN 2026: INSTITUTIONAL REVERSAL DETECTOR
+                # Analyse: Wyckoff, ML Patterns, Divergences CVD, Changepoint
+                # + VETO FATIGUE (Circuit Breaker)
+                # ═══════════════════════════════════════════════════════════════
+                inst_result = None
+                inst_score = 0.0
+                inst_veto_fatigue = False
+
+                try:
+                    if institutional_detector is not None and rates_df_fresh is not None:
+                        # Préparer les données pour le détecteur
+                        market_data_for_ird = {
+                            'candles_m5': rates_df_m5 if rates_df_m5 is not None else pd.DataFrame(),
+                            'candles_m1': rates_df_fresh,
+                            'cvd_values': [],  # TODO: Extraire CVD depuis orderflow
+                            'delta_values': [],  # TODO: Extraire delta depuis orderflow
+                            'volume_values': rates_df_fresh['volume'].tolist() if 'volume' in rates_df_fresh.columns else []
+                        }
+
+                        # Appel au détecteur
+                        inst_result = institutional_detector.detect_reversal(market_data_for_ird)
+                        inst_score = inst_result.get('institutional_score', 0.0)
+
+                        # Log du résultat
+                        conviction = inst_result.get('conviction_level', 'LOW')
+                        new_trend = inst_result.get('new_trend', 'NEUTRAL')
+                        reversal = inst_result.get('reversal_detected', False)
+
+                        emoji = "🏛️" if inst_score >= 60 else "📊"
+                        logger.info(
+                            f"{emoji} [INSTITUTIONAL][{asset}] Score: {inst_score:.1f}/100 | "
+                            f"Conviction: {conviction} | Trend: {new_trend} | "
+                            f"Reversal: {'✅' if reversal else '❌'}"
+                        )
+
+                        # ════════════════════════════════════════════════════
+                        # 🚫 VETO FATIGUE (Circuit Breaker)
+                        # Si le marché est épuisé, bloquer le trade
+                        # ════════════════════════════════════════════════════
+                        fatigue_signal = institutional_detector.get_fatigue_signal(market_data_for_ird)
+                        fatigue_strength = fatigue_signal.strength
+                        fatigue_threshold = institutional_detector.config.get('thresholds', {}).get('fatigue_veto_threshold', 80)
+
+                        if fatigue_strength >= fatigue_threshold:
+                            inst_veto_fatigue = True
+                            logger.warning(
+                                f"⚡ [CIRCUIT_BREAKER][{asset}] VETO FATIGUE | "
+                                f"Marché épuisé (Score: {fatigue_strength:.0f}/{fatigue_threshold}) | "
+                                f"Trade bloqué pour sécurité"
+                            )
+
+                except Exception as e_inst:
+                    logger.error(f"[INSTITUTIONAL][{asset}] Erreur: {e_inst}", exc_info=True)
+
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
                 # 🔧 FIX (03 JAN 2026): Initialiser fusion_out pour éviter UnboundLocalError
@@ -4181,6 +4246,14 @@ def scalping_worker(
                                         f"MALUS_REGIME: -20 (Régime '{current_regime}' incompatible avec {signal_action})"
                                     )
 
+                            # MALUS 4: VETO FATIGUE (Circuit Breaker) (-50 pts)
+                            # Condition: Marché épuisé détecté par IRD
+                            if inst_veto_fatigue:
+                                pma_malus += 50.0
+                                pma_adjustments.append(
+                                    f"MALUS_FATIGUE: -50 (Circuit Breaker - Marché épuisé)"
+                                )
+
                             # ══════════════════════════════════════════════════════
                             # 📈 CALCUL DES BONUS (Validation & Alignement)
                             # ══════════════════════════════════════════════════════
@@ -4233,6 +4306,23 @@ def scalping_worker(
                                     pma_bonus += 5.0
                                     pma_adjustments.append(
                                         f"BONUS_TREND_CONSISTENCY: +5 (Clarity={memory_clarity:.2f}, Strength={memory_trend_strength:.2f})"
+                                    )
+
+                            # BONUS 4: Institutional Reversal Signal (+10 pts)
+                            # Condition: Score institutionnel >= 65 ET aligné avec le signal
+                            if inst_result is not None and inst_score >= 65:
+                                inst_trend = inst_result.get('new_trend', 'NEUTRAL')
+                                if (inst_trend == "BULLISH" and signal_action == "BUY") or \
+                                   (inst_trend == "BEARISH" and signal_action == "SELL"):
+                                    pma_bonus += 10.0
+                                    pma_adjustments.append(
+                                        f"BONUS_INSTITUTIONAL: +10 (Score={inst_score:.0f}, Trend={inst_trend})"
+                                    )
+                                elif inst_result.get('reversal_detected', False):
+                                    # Reversal détecté mais dans direction opposée → prudence
+                                    pma_malus += 15.0
+                                    pma_adjustments.append(
+                                        f"MALUS_INST_REVERSAL: -15 (Reversal {inst_trend} vs Signal {signal_action})"
                                     )
 
                             # ══════════════════════════════════════════════════════
@@ -4320,6 +4410,14 @@ def scalping_worker(
                                         "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
                                     },
                                     "micro_resistance": micro_resistance_info
+                                },
+                                # 🏛️ 25 JAN 2026: Institutional Reversal Detector
+                                "institutional": {
+                                    "score": inst_score,
+                                    "conviction": inst_result.get('conviction_level', 'N/A') if inst_result else 'N/A',
+                                    "trend": inst_result.get('new_trend', 'N/A') if inst_result else 'N/A',
+                                    "reversal_detected": inst_result.get('reversal_detected', False) if inst_result else False,
+                                    "veto_fatigue": inst_veto_fatigue
                                 }
                             }
 
