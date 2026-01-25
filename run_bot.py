@@ -4303,22 +4303,30 @@ def scalping_worker(
                                 "timing_quality": timing_verdict.get("quality_metrics", {}),
                                 "price": anchor_price,
                                 "context": ctx,
-                                # 🆕 25 JAN 2026: Infos MTF et micro-résistance
-                                "mtf_verdict": {
-                                    "direction": mtf_direction,
-                                    "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
-                                    "bonus": mtf_bonus,
-                                    "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
-                                    "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
-                                    "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
-                                },
-                                "micro_resistance": micro_resistance_info
+                                # 🧠 25 JAN 2026: Price Memory Analyzer (Post-Processing)
+                                "price_memory": {
+                                    "score_brut": orderflow_result_mini.get("score_before_pma", orderflow_result_mini["score"]),
+                                    "score_ajuste": orderflow_result_mini["score"],
+                                    "pma_bonus": pma_bonus,
+                                    "pma_malus": pma_malus,
+                                    "pma_adjustment": pma_bonus - pma_malus,
+                                    "adjustments": pma_adjustments,
+                                    "veto_dur": pma_veto_dur,
+                                    "mtf": {
+                                        "direction": mtf_direction,
+                                        "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
+                                        "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
+                                        "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
+                                        "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
+                                    },
+                                    "micro_resistance": micro_resistance_info
+                                }
                             }
 
                             logger.info(
                                 f"🎯 [MINIMALIST][{asset}] ✅ {fusion_out['action']} | "
                                 f"confidence={fusion_out['fused_confidence']:.2f} | "
-                                f"OF_score={orderflow_result_mini['score']:.1f}"
+                                f"Score: {orderflow_result_mini.get('score_before_pma', orderflow_result_mini['score']):.1f} → {orderflow_result_mini['score']:.1f}"
                             )
                         else:
                             fusion_out = {
@@ -4423,16 +4431,24 @@ def scalping_worker(
                                 "timing_quality": timing_verdict.get("quality_metrics", {}),
                                 "price": anchor_price,
                                 "context": ctx,
-                                # 🆕 25 JAN 2026: Infos MTF et micro-résistance
-                                "mtf_verdict": {
-                                    "direction": mtf_direction,
-                                    "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
-                                    "bonus": mtf_bonus,
-                                    "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
-                                    "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
-                                    "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
-                                },
-                                "micro_resistance": micro_resistance_info
+                                # 🧠 25 JAN 2026: Price Memory Analyzer (valeurs par défaut - branche PASS_NORMAL)
+                                "price_memory": {
+                                    "score_brut": orderflow_result_mini["score"],
+                                    "score_ajuste": orderflow_result_mini["score"],
+                                    "pma_bonus": 0.0,
+                                    "pma_malus": 0.0,
+                                    "pma_adjustment": 0.0,
+                                    "adjustments": [],
+                                    "veto_dur": False,
+                                    "mtf": {
+                                        "direction": mtf_direction,
+                                        "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
+                                        "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
+                                        "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
+                                        "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
+                                    },
+                                    "micro_resistance": micro_resistance_info
+                                }
                             }
 
                             logger.info(
