@@ -71,8 +71,7 @@
         "strategy_asset_mapping": {
           "scalping": [
             "USDJPY",
-            "NAS100",
-            "GBPUSD"
+            "NAS100"
           ]
         }
       }
@@ -84,7 +83,6 @@
     "max_total_risk_percent": 6,
     "global_allowed_symbols": [
       "NAS100",
-      "GBPUSD",
       "USDJPY"
     ],
     "max_allowed_lot_size": 50.0

@@ -11,7 +11,6 @@
             "priority": 1,
             "allowed_symbols": [
                 "NAS100",
-                "GBPUSD",
                 "USDJPY"
             ],
             "account_type": "STANDARD",
@@ -35,16 +34,6 @@
             "max_lot": 10.0,
             "lot_step": 0.01,
             "spread_points": 80
-        },
-        "GBPUSD": {
-            "enabled": true,
-            "digits": 5,
-            "point": 1e-05,
-            "contract_size": 100000,
-            "min_lot": 0.01,
-            "max_lot": 100.0,
-            "lot_step": 0.01,
-            "spread_points": 20
         },
         "USDJPY": {
             "enabled": true,

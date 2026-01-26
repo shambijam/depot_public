@@ -375,7 +375,7 @@ def main(args: argparse.Namespace) -> None:
         logger.warning(
             f"Impossible de construire readiness_symbols dynamiques, fallback statique. Détail: {e}"
         )
-        readiness_symbols = ["EURUSD", "GBPUSD", "XAUUSD", "NAS100"]  # fallback ultime
+        readiness_symbols = ["EURUSD", "XAUUSD", "NAS100"]  # fallback ultime
 
     try:
 

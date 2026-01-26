@@ -611,7 +611,7 @@ def run_single_pipeline_cycle(
             ) or {}
 
             # --- Seuils depuis conf (avec défauts prudents) ---
-            sym_spread_max = {"NAS100": 80.0, "GBPUSD": 18.0, "USDJPY": 40.0}.get(
+            sym_spread_max = {"NAS100": 80.0, "USDJPY": 40.0}.get(
                 str(sym).upper(), 999.0
             )
 
@@ -4099,8 +4099,6 @@ def scalping_worker(
                             tickrate_min_threshold = 2.0  # Default
                             if asset == "NAS100":
                                 tickrate_min_threshold = 5.0
-                            elif asset == "GBPUSD":
-                                tickrate_min_threshold = 3.5
                             elif asset == "USDJPY":
                                 tickrate_min_threshold = 1.5
 
@@ -4923,7 +4921,7 @@ def dashboard_worker(
                 print("─" * 110)
 
                 # Lignes par asset (ordre fixe)
-                for asset_name in ["USDJPY", "NAS100", "GBPUSD"]:
+                for asset_name in ["USDJPY", "NAS100"]:
                     if asset_name in reports:
                         r = reports[asset_name]
 
@@ -5312,7 +5310,6 @@ def main(args: argparse.Namespace) -> None:
     logger.info("=" * 80)
     logger.info(f"  • SCALPING USDJPY Thread : Cycle {scalping_cycle}s (offset 0.0s)")
     logger.info(f"  • SCALPING NAS100 Thread : Cycle {scalping_cycle}s (offset 1.5s)")
-    logger.info(f"  • SCALPING GBPUSD Thread : Cycle {scalping_cycle}s (offset 3.0s)")
     logger.info("  • DASHBOARD Thread       : Affichage agrégé 30s")
     logger.info("  • BASKET MONITOR Thread  : Surveillance continue (polling 100ms)")
     logger.info("=" * 80)
@@ -5336,7 +5333,7 @@ def main(args: argparse.Namespace) -> None:
     context_lock = threading.Lock()
 
     # ✅ Créer GlobalScalpingState (31 DEC 2025)
-    assets = ["USDJPY", "NAS100", "GBPUSD"]
+    assets = ["USDJPY", "NAS100"]
     global_scalping_state = GlobalScalpingState(assets)
 
     # ✅ Créer Display Queue (31 DEC 2025 - Solution B)
@@ -5392,28 +5389,6 @@ def main(args: argparse.Namespace) -> None:
         name="ScalpingWorker-NAS100"
     )
 
-    thread_gbpusd = threading.Thread(
-        target=scalping_worker,
-        args=(
-            "GBPUSD",                    # asset
-            global_scalping_state,       # global state
-            display_queue,               # display queue (31 DEC 2025)
-            context_lock,                # context lock (31 DEC 2025)
-            3.0,                         # offset: 3.0s après USDJPY
-            mt5_connector,
-            decision_pipeline,
-            trade_executor,
-            config_manager,
-            mecano,
-            strategy_manager,
-            is_dry_run,
-            scalping_stop_event,
-            logger
-        ),
-        daemon=True,
-        name="ScalpingWorker-GBPUSD"
-    )
-
     # ✅ Créer thread dashboard (31 DEC 2025 - Solution B)
     # 🔍 (05 JAN 2026): Support mode verbose pour déboguer
     verbose_mode = getattr(args, 'verbose', False)
@@ -5461,7 +5436,6 @@ def main(args: argparse.Namespace) -> None:
     # ✅ Démarrer tous les threads (31 DEC 2025)
     thread_usdjpy.start()
     thread_nas100.start()
-    thread_gbpusd.start()
     thread_dashboard.start()
     basket_monitor.start()
 

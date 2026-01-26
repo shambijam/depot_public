@@ -70,7 +70,7 @@ class DecisionPipeline:
 
         # ✅ Cache local des configs assets
         self.asset_configs: Dict[str, Dict[str, Any]] = {}
-        for asset in ["NAS100", "GBPUSD", "USDJPY"]:
+        for asset in ["NAS100", "USDJPY"]:
             try:
                 cfg = self.config_manager.load_asset_config(asset)
                 self.asset_configs[asset] = cfg
