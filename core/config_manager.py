@@ -31,6 +31,7 @@ from typing import (
 from functools import lru_cache
 from enum import Enum
 from core.config_loader import ConfigLoader
+from core.config_merge import ConfigMerger
 
 from core.audit_logger import AuditLogger
 from core.strategy_manager import StrategyManager
@@ -85,6 +86,7 @@ class ConfigManager:
 
         # Dépendances principales
         self.config_loader = ConfigLoader(config_manager_instance=self)
+        self.config_merger = ConfigMerger(self.config_loader)
         self.audit_logger = AuditLogger(config_manager_instance=self)
    
         self.strategy_manager = StrategyManager(
@@ -195,6 +197,10 @@ class ConfigManager:
                 cache_size = len(self._asset_config_cache)
                 self._asset_config_cache.clear()
                 self.logger.info(f"🔄 [HOT-RELOAD] Cache assets vidé ({cache_size} entrées)")
+
+            if hasattr(self, "config_merger"):
+                self.config_merger.clear_cache()
+                self.logger.info("🔄 [HOT-RELOAD] Cache ConfigMerger vidé")
 
             # 2. Recharger prod_config.json
             template_path = self.get("paths.prod_config", "config/prod_config.json")
@@ -396,6 +402,15 @@ class ConfigManager:
 
     def get_burst_closure_conf(self) -> Dict[str, Any]:
         return self.get("entry_rules.scalping.burst_scalping.closure_rules", {}) or {}
+
+    def get_merged_config_for_asset(self, asset, strategy_name="scalping", force_reload=False):
+        return self.config_merger.get_merged_config(asset, strategy_name, force_reload)
+
+    def get_asset_closure_rules(self, asset, strategy_name="scalping"):
+        return self.config_merger.get_closure_rules_config(asset, strategy_name)
+
+    def get_asset_sltp_config(self, asset, strategy_name="scalping"):
+        return self.config_merger.get_sltp_config(asset, strategy_name)
 
     def coalesce_rr_settings(self) -> Dict[str, float]:
         """

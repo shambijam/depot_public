@@ -3387,35 +3387,41 @@ def scalping_worker(
                             .get("sltp", {})
                         ) or {}
 
-                    # Fusionner config scalping avec base_config + asset overrides (31 DEC 2025)
+                    # Fusionner config scalping avec base_config + ALL asset overrides via ConfigMerger
                     try:
-                        scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
                         merged_config = dict(base_config)
+
+                        # Merge strategy entry_rules
+                        scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
                         if "entry_rules" in scalping_strategy_config:
                             merged_config.setdefault("entry_rules", {}).update(
                                 scalping_strategy_config["entry_rules"]
                             )
 
-                        # ✅ FIX (31 DEC 2025): Fusionner asset-specific overrides (target_profit_pips, etc.)
-                        # 🐛 FIX (02 JAN 2026): Utiliser load_asset_config au lieu de get_asset_config
-                        asset_config = config_manager.load_asset_config(asset)
-                        asset_overrides = asset_config.get("overrides", {}).get("scalping", {})
-                        if asset_overrides:
-                            # Fusionner deep les overrides d'actif dans entry_rules.scalping.burst_scalping
-                            burst_scalping_path = merged_config.setdefault("entry_rules", {}).setdefault("scalping", {}).setdefault("burst_scalping", {})
+                        # Merge ALL asset overrides via ConfigMerger
+                        asset_merged = config_manager.get_merged_config_for_asset(asset, "scalping")
+                        if asset_merged and "entry_rules" in asset_merged:
+                            merged_config["entry_rules"] = _deep_merge_dicts(
+                                merged_config.get("entry_rules", {}),
+                                asset_merged["entry_rules"]
+                            )
 
-                            # Fusionner closure_rules si présent dans asset overrides
-                            if "closure_rules" in asset_overrides:
-                                burst_scalping_path.setdefault("closure_rules", {}).update(asset_overrides["closure_rules"])
+                        # Inject symbol_info
+                        if asset_merged and "symbol_info" in asset_merged:
+                            merged_config["symbol_info"] = asset_merged["symbol_info"]
 
-                            # Fusionner sltp si présent dans asset overrides
-                            if "sltp" in asset_overrides:
-                                burst_scalping_path.setdefault("sltp", {}).update(asset_overrides["sltp"])
-                                sltp_cfg = burst_scalping_path["sltp"]
+                        # Update sltp_cfg pour le skeleton
+                        burst_section = (
+                            merged_config.get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                        )
+                        if "sltp" in burst_section:
+                            sltp_cfg = burst_section["sltp"]
 
-                            logger.info(f"✅ [CONFIG_MERGE] Asset overrides appliqués pour {asset}")
+                        logger.info(f"✅ [CONFIG_MERGE] ALL asset overrides applied for {asset} via ConfigMerger")
                     except Exception as e:
-                        logger.warning(f"[{asset}] Fusion config échouée: {e}")
+                        logger.warning(f"[{asset}] ConfigMerger failed: {e}", exc_info=True)
                         merged_config = base_config
 
                     # ⚡ SQUELETTE PRÉ-CALCULÉ (parties statiques)
