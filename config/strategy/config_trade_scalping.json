@@ -12,11 +12,11 @@
     "enabled": true,
     "description": "Scoring composite évolutif - 5 composants pondérés (03 JAN 2026)",
     "weights": {
-      "orderflow": 0.50,
-      "microstructure": 0.20,
-      "liquidity": 0.15,
-      "divergence": 0.10,
-      "smart_money": 0.05
+      "orderflow": 0.35,
+      "institutional": 0.25,
+      "context": 0.20,
+      "technical": 0.15,
+      "risk": 0.05
     },
     "thresholds": {
       "strong_signal": 75.0,
