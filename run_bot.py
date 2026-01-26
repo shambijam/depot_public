@@ -3681,6 +3681,15 @@ def scalping_worker(
                     mtf_bonus = 0.0
                     mtf_direction = "NEUTRAL"
 
+                # Appliquer le bonus MTF au score composite (M15+M5+M1 alignés = +30 pts)
+                if mtf_bonus > 0 and orderflow_result_mini.get('composite_enabled'):
+                    score_before = orderflow_result_mini['score']
+                    orderflow_result_mini['score'] = min(100.0, score_before + mtf_bonus)
+                    logger.info(
+                        f"[MTF_BONUS][{asset}] +{mtf_bonus:.0f} pts appliqué au composite: "
+                        f"{score_before:.1f} → {orderflow_result_mini['score']:.1f}"
+                    )
+
                 # ═══════════════════════════════════════════════════════════════
                 # 🆕 25 JAN 2026: MICRO-RÉSISTANCES M1 (Scalping)
                 # Détecte les niveaux de résistance proches pour éviter trades BUY contre résistance
