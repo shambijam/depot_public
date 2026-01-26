@@ -127,6 +127,10 @@ def calculate_pip_value_per_lot(
     """
     symbol = symbol.upper().strip()
 
+    # NAS100 / US100: 1 pip = 0.01 index point, valeur fixe 20 USD/pip/lot
+    if "NAS" in symbol or "US100" in symbol:
+        return 20.0
+
     # Méthode 1: Utiliser trade_tick_value et trade_tick_size de MT5 (PRÉCIS)
     if symbol_info is not None:
         try:

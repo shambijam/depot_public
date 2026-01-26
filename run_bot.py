@@ -3411,6 +3411,7 @@ def scalping_worker(
                             # Fusionner sltp si présent dans asset overrides
                             if "sltp" in asset_overrides:
                                 burst_scalping_path.setdefault("sltp", {}).update(asset_overrides["sltp"])
+                                sltp_cfg = burst_scalping_path["sltp"]
 
                             logger.info(f"✅ [CONFIG_MERGE] Asset overrides appliqués pour {asset}")
                     except Exception as e:
