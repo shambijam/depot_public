@@ -44,8 +44,13 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     import uuid, time as _t
 
     # 🔍 DEBUG: Vérifier ce que contient base_request
-    print(f"🔍 [BURST_DEBUG] base_request keys: {list(base_request.keys())}", flush=True)
-    print(f"🔍 [BURST_DEBUG] has trade_decision: {'trade_decision' in base_request}", flush=True)
+    print(
+        f"🔍 [BURST_DEBUG] base_request keys: {list(base_request.keys())}", flush=True
+    )
+    print(
+        f"🔍 [BURST_DEBUG] has trade_decision: {'trade_decision' in base_request}",
+        flush=True,
+    )
 
     if not isinstance(base_request, dict) or burst_size is None:
         return {"status": "failed", "reason": "bad_args"}
@@ -77,14 +82,20 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
         req = _base_req_copy()
         burst_num = idx + 1
 
-        print(f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Avant envoi | SL={req.get('sl')} | TP={req.get('tp')} | symbol={req.get('symbol')} | basket_id={basket_id}", flush=True)
+        print(
+            f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Avant envoi | SL={req.get('sl')} | TP={req.get('tp')} | symbol={req.get('symbol')} | basket_id={basket_id}",
+            flush=True,
+        )
 
         try:
             res = self.execute_order(req)
             if res and res.get("status") in {"sent", "placed", "filled"}:
                 tk = res.get("order") or res.get("deal") or res.get("ticket")
                 if tk:
-                    print(f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Ordre envoyé | ticket={tk} | status={res.get('status')}", flush=True)
+                    print(
+                        f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Ordre envoyé | ticket={tk} | status={res.get('status')}",
+                        flush=True,
+                    )
                     return ("success", int(tk), None)
                 else:
                     return ("error", None, res)
@@ -102,7 +113,10 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     if parallel_enabled and burst_size > 1:
         # ⚡ ENVOI PARALLÈLE — Toutes les positions simultanément (~100ms au lieu de 840ms)
         with ThreadPoolExecutor(max_workers=burst_size) as executor:
-            futures = {executor.submit(_send_single_order, idx): idx for idx in range(burst_size)}
+            futures = {
+                executor.submit(_send_single_order, idx): idx
+                for idx in range(burst_size)
+            }
 
             for future in as_completed(futures):
                 try:
@@ -126,7 +140,9 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
                 errors.append(error)
 
             # Micro-délai anti-rafale en mode séquentiel
-            _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.005) or 0.005))
+            _t.sleep(
+                float(self.config_manager.get("burst_send_sleep_s", 0.005) or 0.005)
+            )
 
     # marque le cooldown “dernier burst”
     try:
@@ -143,19 +159,28 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     # ✅ AJOUTÉ (25 Nov 2025): Journalisation ENTRÉE trade pour analyse data-driven
     # DEBUG: Tracer les conditions
     has_tickets = bool(tickets)
-    has_attr = hasattr(self, 'trade_logger')
+    has_attr = hasattr(self, "trade_logger")
     logger_not_none = has_attr and self.trade_logger is not None
-    print(f"🔍 [TRADE_LOG][DEBUG] tickets={has_tickets} hasattr={has_attr} not_none={logger_not_none}", flush=True)
+    print(
+        f"🔍 [TRADE_LOG][DEBUG] tickets={has_tickets} hasattr={has_attr} not_none={logger_not_none}",
+        flush=True,
+    )
 
-    if tickets and hasattr(self, 'trade_logger') and self.trade_logger is not None:
+    if tickets and hasattr(self, "trade_logger") and self.trade_logger is not None:
         try:
             # Récupérer trade_decision depuis base_request
             td = base_request.get("trade_decision", {})
-            print(f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}", flush=True)
+            print(
+                f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}",
+                flush=True,
+            )
 
             # Les données FusionManager sont dans td["fusion_data"]
             fusion_data = td.get("fusion_data", {})
-            print(f"🔍 [TRADE_LOG][DEBUG] fusion_data keys: {list(fusion_data.keys())}", flush=True)
+            print(
+                f"🔍 [TRADE_LOG][DEBUG] fusion_data keys: {list(fusion_data.keys())}",
+                flush=True,
+            )
 
             # Score final
             score_final = float(fusion_data.get("fused_confidence", 0.0))
@@ -164,7 +189,9 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             components = fusion_data.get("components", {})
 
             n_of = components.get("orderflow", {})
-            n_fp = components.get("validator", {})  # FusionManager retourne "validator" pas "footprint"
+            n_fp = components.get(
+                "validator", {}
+            )  # FusionManager retourne "validator" pas "footprint"
             n_tr = components.get("trigger", {})
 
             of_score = float(n_of.get("score", 0.0))
@@ -181,6 +208,7 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             fp_summary = fp_raw.get("summary", {})
             if isinstance(fp_summary, str):
                 import json
+
                 try:
                     fp_summary = json.loads(fp_summary)
                 except:
@@ -203,9 +231,17 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             context_data = td.get("context", {})
             phase_data = context_data.get("phase", {})
 
-            market_phase = phase_data.get("phase") if isinstance(phase_data, dict) else None
-            market_regime = phase_data.get("regime") if isinstance(phase_data, dict) else None
-            phase_confidence = phase_data.get("confidence_score") if isinstance(phase_data, dict) else None
+            market_phase = (
+                phase_data.get("phase") if isinstance(phase_data, dict) else None
+            )
+            market_regime = (
+                phase_data.get("regime") if isinstance(phase_data, dict) else None
+            )
+            phase_confidence = (
+                phase_data.get("confidence_score")
+                if isinstance(phase_data, dict)
+                else None
+            )
 
             # Régime VWAP depuis components
             n_vw = components.get("vwap", {})
@@ -217,7 +253,9 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             direction = "BUY" if base_request.get("action") == "BUY" else "SELL"
             entry_price = float(base_request.get("price", 0.0))
             volume_per_ticket = float(base_request.get("volume", 0.0))
-            volume_total = volume_per_ticket * len(tickets)  # Volume réel des positions ouvertes
+            volume_total = volume_per_ticket * len(
+                tickets
+            )  # Volume réel des positions ouvertes
             sl_price = float(base_request.get("sl", 0.0))
             tp_price = float(base_request.get("tp", 0.0))
 
@@ -258,11 +296,16 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
                 vwap_score=vwap_score_value,
                 # Extra
                 tickets=tickets,
-                status=status
+                status=status,
             )
-            self.logger.info(f"✅ [TRADE_LOG][DEBUG] log_trade_entry() appelé avec succès pour basket {basket_id}")
+            self.logger.info(
+                f"✅ [TRADE_LOG][DEBUG] log_trade_entry() appelé avec succès pour basket {basket_id}"
+            )
         except Exception as e:
-            self.logger.error(f"❌ [TRADE_LOG] Erreur log entrée basket {basket_id}: {e}", exc_info=True)
+            self.logger.error(
+                f"❌ [TRADE_LOG] Erreur log entrée basket {basket_id}: {e}",
+                exc_info=True,
+            )
 
     return {
         "status": status,
@@ -755,7 +798,11 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
             )
 
         # ✅ AJOUTÉ (25 Nov 2025): Journalisation SORTIE trade si toutes positions fermées
-        if all_closed and hasattr(self, 'trade_logger') and self.trade_logger is not None:
+        if (
+            all_closed
+            and hasattr(self, "trade_logger")
+            and self.trade_logger is not None
+        ):
             try:
                 # Calculer PnL total depuis les positions fermées
                 total_pnl_pips = 0.0
@@ -766,10 +813,14 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
                 symbol_info_obj = None
                 current_rate = None
                 try:
-                    if hasattr(self, 'mt5_connector') and symbol_hint:
-                        symbol_info_obj = self.mt5_connector.get_symbol_info(symbol_hint)
+                    if hasattr(self, "mt5_connector") and symbol_hint:
+                        symbol_info_obj = self.mt5_connector.get_symbol_info(
+                            symbol_hint
+                        )
                     if basket_pos:
-                        current_rate = _safe_float(_v(basket_pos[0], "price_current"), 0.0)
+                        current_rate = _safe_float(
+                            _v(basket_pos[0], "price_current"), 0.0
+                        )
                 except Exception:
                     pass
 
@@ -785,10 +836,14 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
                             pip_value_per_lot = calculate_pip_value_per_lot(
                                 symbol=symbol_hint,
                                 symbol_info=symbol_info_obj,
-                                current_rate=current_rate
+                                current_rate=current_rate,
                             )
                             pip_value_total = pip_value_per_lot * volume
-                            profit_pips = profit_usd / pip_value_total if pip_value_total > 0 else 0.0
+                            profit_pips = (
+                                profit_usd / pip_value_total
+                                if pip_value_total > 0
+                                else 0.0
+                            )
                         else:
                             profit_pips = 0.0
                         total_pnl_pips += profit_pips
@@ -801,7 +856,9 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
                         pass
 
                 # Prix de sortie moyen
-                exit_price_avg = sum(exit_prices) / len(exit_prices) if exit_prices else 0.0
+                exit_price_avg = (
+                    sum(exit_prices) / len(exit_prices) if exit_prices else 0.0
+                )
 
                 # Déterminer raison sortie
                 if forced_sl:
@@ -817,10 +874,13 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
                     exit_price=exit_price_avg,
                     pnl_pips=total_pnl_pips,
                     pnl_usd=total_pnl_usd,
-                    exit_reason=exit_reason
+                    exit_reason=exit_reason,
                 )
             except Exception as e:
-                self.logger.error(f"❌ [TRADE_LOG] Erreur log sortie basket {basket_id}: {e}", exc_info=True)
+                self.logger.error(
+                    f"❌ [TRADE_LOG] Erreur log sortie basket {basket_id}: {e}",
+                    exc_info=True,
+                )
 
         _purge_states(basket_id, symbol_hint)
         return {
@@ -891,13 +951,23 @@ def monitor_burst_baskets(
         logger.info("")
         logger.info("   📈 PROFIT (fermeture automatique au gain):")
         logger.info(f"      • enable_profit_close: {enable_profit_close}")
-        logger.info(f"      • target_profit_pips: {target_profit_pips} pips  ← Fermeture si atteint")
-        logger.info(f"      • require_full_count_for_profit_close: {require_full_count}")
+        logger.info(
+            f"      • target_profit_pips: {target_profit_pips} pips  ← Fermeture si atteint"
+        )
+        logger.info(
+            f"      • require_full_count_for_profit_close: {require_full_count}"
+        )
         logger.info("")
         logger.info("   🛡️  LOSS GUARD (protection perte maximale):")
-        logger.info(f"      • enable_loss_guard: {enable_loss_guard}  ← {'ACTIVÉ ✅' if enable_loss_guard else 'DÉSACTIVÉ'}")
-        logger.info(f"      • max_loss_pips: {max_loss_pips} pips  ← Fermeture si perte >= -{max_loss_pips} pips")
-        logger.info(f"      • loss_guard_arming_ms: {loss_guard_arming_ms} ms (délai avant activation)")
+        logger.info(
+            f"      • enable_loss_guard: {enable_loss_guard}  ← {'ACTIVÉ ✅' if enable_loss_guard else 'DÉSACTIVÉ'}"
+        )
+        logger.info(
+            f"      • max_loss_pips: {max_loss_pips} pips  ← Fermeture si perte >= -{max_loss_pips} pips"
+        )
+        logger.info(
+            f"      • loss_guard_arming_ms: {loss_guard_arming_ms} ms (délai avant activation)"
+        )
         logger.info("")
         logger.info("   ⚙️  PARAMÈTRES GÉNÉRAUX:")
         logger.info(f"      • min_age_ms_for_any_close: {min_age_ms_for_any_close} ms")
@@ -929,9 +999,7 @@ def monitor_burst_baskets(
         self._basket_first_seen_ts = {}  # basket_id -> float(ts)
 
     # ---------- Helpers ----------
-    BASKET_TAG_RE = re.compile(
-        r"bs_([a-f0-9]{8})"
-    )
+    BASKET_TAG_RE = re.compile(r"bs_([a-f0-9]{8})")
 
     def _v(pos, key, default=None):
         if isinstance(pos, dict):
@@ -1112,9 +1180,7 @@ def monitor_burst_baskets(
 
         # Extraction des tickets
         tickets = [
-            int(_v(p, "ticket"))
-            for p in positions
-            if _v(p, "ticket") is not None
+            int(_v(p, "ticket")) for p in positions if _v(p, "ticket") is not None
         ]
 
         if not tickets:
@@ -1127,13 +1193,15 @@ def monitor_burst_baskets(
                 result = mt5c_close_parallel(
                     tickets=tickets,
                     reason="basket_close",
-                    comment=f"basket_{basket_id}"
+                    comment=f"basket_{basket_id}",
                 )
 
                 # Vérifier le résultat
                 if result.get("failed", 0) == 0:
                     # SUCCÈS TOTAL - toutes les positions fermées
-                    logger.info(f"[CLOSE] ✅ Panier '{basket_id}' fermé INSTANTANÉMENT ({result['total']} positions parallèles).")
+                    logger.info(
+                        f"[CLOSE] ✅ Panier '{basket_id}' fermé INSTANTANÉMENT ({result['total']} positions parallèles)."
+                    )
 
                     # Cooldown par symbole si demandé
                     try:
@@ -1176,14 +1244,16 @@ def monitor_burst_baskets(
                         f"{result['failed']} échecs"
                     )
                     # On retourne True quand même si la majorité est fermée
-                    return result['closed'] > 0
+                    return result["closed"] > 0
 
             except Exception as e:
                 logger.error(f"[CLOSE] close_positions_parallel KO: {e}")
                 # Fallback vers méthode série si erreur
 
         # FALLBACK: Fermeture série (ancienne méthode)
-        logger.warning(f"[CLOSE] Fallback série pour '{basket_id}' ({len(tickets)} positions)")
+        logger.warning(
+            f"[CLOSE] Fallback série pour '{basket_id}' ({len(tickets)} positions)"
+        )
 
         ok, ko = 0, 0
         for p in positions:
@@ -1203,9 +1273,7 @@ def monitor_burst_baskets(
             logger.info(f"[CLOSE] Panier '{basket_id}' fermé (fallback série).")
             return True
 
-        logger.warning(
-            f"[CLOSE] Fermeture partielle '{basket_id}' ({ok}/{ok+ko})."
-        )
+        logger.warning(f"[CLOSE] Fermeture partielle '{basket_id}' ({ok}/{ok+ko}).")
         return False
 
     # =========================
@@ -1219,7 +1287,9 @@ def monitor_burst_baskets(
         for basket_id in baskets_init.keys():
             if basket_id not in self._basket_first_seen_ts:
                 self._basket_first_seen_ts[basket_id] = time.time()
-                logger.info(f"🆕 [BASKET_INIT] {basket_id} enregistré pour surveillance (profit + loss_guard)")
+                logger.info(
+                    f"🆕 [BASKET_INIT] {basket_id} enregistré pour surveillance (profit + loss_guard)"
+                )
 
     # =========================
     # Phase A — FAST (profit target)
@@ -1247,7 +1317,9 @@ def monitor_burst_baskets(
                 # init âge
                 if basket_id not in self._basket_first_seen_ts:
                     self._basket_first_seen_ts[basket_id] = time.time()
-                    logger.info(f"🆕 [BASKET_DETECTED] {basket_id} | {len(pos)} positions détectées")
+                    logger.info(
+                        f"🆕 [BASKET_DETECTED] {basket_id} | {len(pos)} positions détectées"
+                    )
 
                 age_ms = int(
                     (time.time() - self._basket_first_seen_ts[basket_id]) * 1000
@@ -1271,29 +1343,45 @@ def monitor_burst_baskets(
                 # 🎯 (05 JAN 2026): Charger config ASSET-SPECIFIC pour target_profit_pips
                 # Permet des seuils différents par actif (ex: USDJPY=2.1, EURUSD=15.0, GBPUSD=20.0)
                 asset_target_profit = target_profit  # Fallback sur global
-                asset_max_loss = max_loss_pips       # Fallback sur global
+                asset_max_loss = max_loss_pips  # Fallback sur global
 
                 try:
                     config_mgr = getattr(self, "config_manager", None)
                     if config_mgr and hasattr(config_mgr, "config_loader"):
-                        asset_config = config_mgr.config_loader.load_asset_config(sym) or {}
-                        asset_closure = (
-                            asset_config.get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_scalping", {})
-                            .get("closure_rules", {})
+                        asset_config = (
+                            config_mgr.config_loader.load_asset_config(sym) or {}
                         )
+                        asset_closure = asset_config.get("entry_rules", {}).get(
+                            "scalping", {}
+                        ).get("burst_scalping", {}).get(
+                            "closure_rules", {}
+                        ) or asset_config.get(
+                            "overrides", {}
+                        ).get(
+                            "scalping", {}
+                        ).get(
+                            "closure_rules", {}
+                        )
+
                         if asset_closure:
-                            asset_target_profit = float(asset_closure.get("target_profit_pips", target_profit))
-                            asset_max_loss = float(asset_closure.get("max_loss_pips", max_loss_pips))
+                            asset_target_profit = float(
+                                asset_closure.get("target_profit_pips", target_profit)
+                            )
+                            asset_max_loss = float(
+                                asset_closure.get("max_loss_pips", max_loss_pips)
+                            )
                             if logger and asset_target_profit != target_profit:
                                 logger.debug(
                                     f"[ASSET_CONFIG][{sym}] target_profit={asset_target_profit}p "
                                     f"(global={target_profit}p) | max_loss={asset_max_loss}p"
                                 )
+                        print(f"[DEBUG CLOSURE] {sym} asset_closure={asset_closure}")
+
                 except Exception as e_asset:
                     if logger:
-                        logger.warning(f"[ASSET_CONFIG][{sym}] Erreur chargement: {e_asset}, using global config")
+                        logger.warning(
+                            f"[ASSET_CONFIG][{sym}] Erreur chargement: {e_asset}, using global config"
+                        )
 
                 # 📊 Log PnL toutes les 5 secondes pour suivre l'évolution
                 now = time.time()
@@ -1314,20 +1402,36 @@ def monitor_burst_baskets(
                     if age_ms >= loss_guard_arming_ms:
                         if pnl_pips <= -asset_max_loss:
                             logger.error("=" * 80)
-                            logger.error(f"🛡️  [LOSS_GUARD_TRIGGERED] {basket_id} ({sym} {direction})")
+                            logger.error(
+                                f"🛡️  [LOSS_GUARD_TRIGGERED] {basket_id} ({sym} {direction})"
+                            )
                             logger.error(f"   📊 PnL actuel: {pnl_pips:.2f} pips")
-                            logger.error(f"   🛡️  Seuil max perte: -{asset_max_loss:.2f} pips [{sym}-specific]")
-                            logger.error(f"   ❌ Condition remplie: {pnl_pips:.2f} <= -{asset_max_loss:.2f}")
-                            logger.error(f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s (arming: {loss_guard_arming_ms/1000:.1f}s)")
-                            logger.error(f"   📦 Positions: {len(pos)}/{expected or len(pos)}")
+                            logger.error(
+                                f"   🛡️  Seuil max perte: -{asset_max_loss:.2f} pips [{sym}-specific]"
+                            )
+                            logger.error(
+                                f"   ❌ Condition remplie: {pnl_pips:.2f} <= -{asset_max_loss:.2f}"
+                            )
+                            logger.error(
+                                f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s (arming: {loss_guard_arming_ms/1000:.1f}s)"
+                            )
+                            logger.error(
+                                f"   📦 Positions: {len(pos)}/{expected or len(pos)}"
+                            )
                             logger.error("   → DÉCLENCHEMENT FERMETURE PROTECTION")
                             logger.error("=" * 80)
 
                             if _close_basket(basket_id, pos):
                                 logger.error("=" * 80)
-                                logger.error(f"🛡️  [LOSS_GUARD_CLOSED] Basket {basket_id} fermé par protection perte")
-                                logger.error(f"   💔 Perte limitée à: {pnl_pips:.2f} pips")
-                                logger.error(f"   🛡️  Seuil max: -{asset_max_loss:.2f} pips [{sym}-specific]")
+                                logger.error(
+                                    f"🛡️  [LOSS_GUARD_CLOSED] Basket {basket_id} fermé par protection perte"
+                                )
+                                logger.error(
+                                    f"   💔 Perte limitée à: {pnl_pips:.2f} pips"
+                                )
+                                logger.error(
+                                    f"   🛡️  Seuil max: -{asset_max_loss:.2f} pips [{sym}-specific]"
+                                )
                                 logger.error("=" * 80)
                                 # Nettoyer le tracking
                                 if basket_id in self._basket_first_seen_ts:
@@ -1337,7 +1441,9 @@ def monitor_burst_baskets(
                                 any_action = True
                                 continue  # Passer au basket suivant
                             else:
-                                logger.error(f"❌ [LOSS_GUARD_FAILED] Échec fermeture basket {basket_id} | Retry au prochain cycle")
+                                logger.error(
+                                    f"❌ [LOSS_GUARD_FAILED] Échec fermeture basket {basket_id} | Retry au prochain cycle"
+                                )
                                 # Continue quand même pour checker les autres baskets
 
                 # ✅ FERMETURE si PnL >= target_profit_pips
@@ -1347,30 +1453,30 @@ def monitor_burst_baskets(
                     logger.info(
                         f"🎯 [PROFIT_TARGET_REACHED] {basket_id} ({sym} {direction})"
                     )
-                    logger.info(
-                        f"   📊 PnL actuel: {pnl_pips:+.2f} pips"
-                    )
+                    logger.info(f"   📊 PnL actuel: {pnl_pips:+.2f} pips")
                     logger.info(
                         f"   🎯 Seuil configuré: {asset_target_profit:.2f} pips [{sym}-specific] ← target_profit_pips"
                     )
                     logger.info(
                         f"   ✅ Condition remplie: {pnl_pips:.2f} >= {asset_target_profit:.2f}"
                     )
-                    logger.info(
-                        f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s"
-                    )
-                    logger.info(
-                        f"   📦 Positions: {len(pos)}/{expected or len(pos)}"
-                    )
+                    logger.info(f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s")
+                    logger.info(f"   📦 Positions: {len(pos)}/{expected or len(pos)}")
                     logger.info("   → DÉCLENCHEMENT FERMETURE IMMÉDIATE")
                     logger.info("=" * 80)
 
                     if _close_basket(basket_id, pos):
                         logger.info("=" * 80)
-                        logger.info(f"✅ [BASKET_CLOSED_SUCCESS] Basket {basket_id} fermé avec succès !")
+                        logger.info(
+                            f"✅ [BASKET_CLOSED_SUCCESS] Basket {basket_id} fermé avec succès !"
+                        )
                         logger.info(f"   💰 Profit sécurisé: +{pnl_pips:.2f} pips")
-                        logger.info(f"   🎯 Seuil utilisé: {asset_target_profit:.2f} pips [{sym}-specific]")
-                        logger.info(f"   📈 Performance: {((pnl_pips/asset_target_profit)*100):.1f}% du target")
+                        logger.info(
+                            f"   🎯 Seuil utilisé: {asset_target_profit:.2f} pips [{sym}-specific]"
+                        )
+                        logger.info(
+                            f"   📈 Performance: {((pnl_pips/asset_target_profit)*100):.1f}% du target"
+                        )
                         logger.info("=" * 80)
                         # Nettoyer le tracking
                         if basket_id in self._basket_first_seen_ts:
@@ -1381,8 +1487,12 @@ def monitor_burst_baskets(
                         continue
                     else:
                         logger.error("=" * 80)
-                        logger.error(f"❌ [BASKET_CLOSE_FAILED] Échec fermeture du basket {basket_id}")
-                        logger.error(f"   📊 PnL: {pnl_pips:+.2f} pips | Target: {target_profit:.2f} pips")
+                        logger.error(
+                            f"❌ [BASKET_CLOSE_FAILED] Échec fermeture du basket {basket_id}"
+                        )
+                        logger.error(
+                            f"   📊 PnL: {pnl_pips:+.2f} pips | Target: {target_profit:.2f} pips"
+                        )
                         logger.error(f"   🔄 Retry au prochain cycle...")
                         logger.error("=" * 80)
 
@@ -1391,7 +1501,9 @@ def monitor_burst_baskets(
             if not any_action:
                 time.sleep(rt_poll_interval_ms / 1000.0)
     else:
-        logger.warning(f"⛔ [BASKET_MONITOR] Boucle de surveillance NON démarrée: enable_profit_close={enable_profit_close} | rt_fast_window_ms={rt_fast_window_ms} | rt_poll_interval_ms={rt_poll_interval_ms}")
+        logger.warning(
+            f"⛔ [BASKET_MONITOR] Boucle de surveillance NON démarrée: enable_profit_close={enable_profit_close} | rt_fast_window_ms={rt_fast_window_ms} | rt_poll_interval_ms={rt_poll_interval_ms}"
+        )
 
         # =========================
         # Phase B — LOSS GUARD (protection perte maximale)
@@ -1400,8 +1512,12 @@ def monitor_burst_baskets(
         if enable_loss_guard and max_loss_pips > 0:
             logger.info("=" * 80)
             logger.info(f"🛡️  [LOSS_GUARD] Surveillance protection perte activée:")
-            logger.info(f"   • max_loss_pips: {max_loss_pips} pips (fermeture si dépassé)")
-            logger.info(f"   • loss_guard_arming_ms: {loss_guard_arming_ms} ms (délai activation)")
+            logger.info(
+                f"   • max_loss_pips: {max_loss_pips} pips (fermeture si dépassé)"
+            )
+            logger.info(
+                f"   • loss_guard_arming_ms: {loss_guard_arming_ms} ms (délai activation)"
+            )
             logger.info("=" * 80)
 
             open_positions = _snapshot_positions()
@@ -1412,7 +1528,9 @@ def monitor_burst_baskets(
                     if basket_id not in self._basket_first_seen_ts:
                         continue
 
-                    age_ms = int((time.time() - self._basket_first_seen_ts[basket_id]) * 1000)
+                    age_ms = int(
+                        (time.time() - self._basket_first_seen_ts[basket_id]) * 1000
+                    )
 
                     # Arming delay : attendre avant d'activer la protection
                     if age_ms < loss_guard_arming_ms:
@@ -1428,30 +1546,48 @@ def monitor_burst_baskets(
                     # 🛡️ FERMETURE si perte >= max_loss_pips (valeur NÉGATIVE)
                     if pnl_pips <= -max_loss_pips:
                         logger.error("=" * 80)
-                        logger.error(f"🛡️  [LOSS_GUARD_TRIGGERED] {basket_id} ({sym} {direction})")
+                        logger.error(
+                            f"🛡️  [LOSS_GUARD_TRIGGERED] {basket_id} ({sym} {direction})"
+                        )
                         logger.error(f"   📊 PnL actuel: {pnl_pips:.2f} pips")
-                        logger.error(f"   🛡️  Seuil max perte: -{max_loss_pips:.2f} pips")
-                        logger.error(f"   ❌ Condition remplie: {pnl_pips:.2f} <= -{max_loss_pips:.2f}")
-                        logger.error(f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s (arming: {loss_guard_arming_ms/1000:.1f}s)")
+                        logger.error(
+                            f"   🛡️  Seuil max perte: -{max_loss_pips:.2f} pips"
+                        )
+                        logger.error(
+                            f"   ❌ Condition remplie: {pnl_pips:.2f} <= -{max_loss_pips:.2f}"
+                        )
+                        logger.error(
+                            f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s (arming: {loss_guard_arming_ms/1000:.1f}s)"
+                        )
                         logger.error(f"   📦 Positions: {len(pos)}")
                         logger.error("   → DÉCLENCHEMENT FERMETURE PROTECTION")
                         logger.error("=" * 80)
 
                         if _close_basket(basket_id, pos):
                             logger.error("=" * 80)
-                            logger.error(f"🛡️  [LOSS_GUARD_CLOSED] Basket {basket_id} fermé par protection perte")
-                            logger.error(f"   💔 Perte limitée à: {pnl_pips:.2f} pips (au lieu de -300 pips)")
+                            logger.error(
+                                f"🛡️  [LOSS_GUARD_CLOSED] Basket {basket_id} fermé par protection perte"
+                            )
+                            logger.error(
+                                f"   💔 Perte limitée à: {pnl_pips:.2f} pips (au lieu de -300 pips)"
+                            )
                             logger.error(f"   🛡️  Seuil max: -{max_loss_pips:.2f} pips")
-                            logger.error(f"   💰 Économisé: {(-300 - pnl_pips):.2f} pips vs SL complet")
+                            logger.error(
+                                f"   💰 Économisé: {(-300 - pnl_pips):.2f} pips vs SL complet"
+                            )
                             logger.error("=" * 80)
                             # Nettoyer le tracking
                             if basket_id in self._basket_first_seen_ts:
                                 del self._basket_first_seen_ts[basket_id]
                         else:
-                            logger.error(f"❌ [LOSS_GUARD_FAILED] Échec fermeture basket {basket_id} | Retry au prochain cycle")
+                            logger.error(
+                                f"❌ [LOSS_GUARD_FAILED] Échec fermeture basket {basket_id} | Retry au prochain cycle"
+                            )
         else:
             if logger:
-                logger.info(f"⛔ [LOSS_GUARD] Protection perte désactivée (enable_loss_guard={enable_loss_guard})")
+                logger.info(
+                    f"⛔ [LOSS_GUARD] Protection perte désactivée (enable_loss_guard={enable_loss_guard})"
+                )
 
 
 # ======================================================================================
