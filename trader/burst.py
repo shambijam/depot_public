@@ -933,8 +933,8 @@ def monitor_burst_baskets(
     max_loss_pips = float(closure.get("max_loss_pips", float(max_loss_pips)))
     loss_guard_arming_ms = int(closure.get("loss_guard_arming_ms", 3000))
     min_age_ms_for_any_close = int(
-        closure.get("min_age_ms_for_any_close", 3000)
-    )  # anti-fermeture trop précoce
+        closure.get("min_age_ms_for_any_close", 0)
+    )
     target_profit_pips = float(closure.get("target_profit_pips", 15.0))
 
     logger = getattr(self, "logger", None)
