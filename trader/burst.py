@@ -1397,9 +1397,7 @@ def monitor_burst_baskets(
                                     f"[ASSET_CONFIG][{sym}] target_profit={asset_target_profit}p "
                                     f"(global={target_profit}p) | max_loss={asset_max_loss}p"
                                 )
-                        logger.warning(
-                            f"[TEST OVERRIDES] {sym} asset_target_profit={asset_target_profit} asset_max_loss={asset_max_loss}"
-                        )
+                        
 
                 except Exception as e_asset:
                     if logger:
