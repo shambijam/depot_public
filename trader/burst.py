@@ -1351,16 +1351,14 @@ def monitor_burst_baskets(
                         asset_config = (
                             config_mgr.config_loader.load_asset_config(sym) or {}
                         )
-                        asset_closure = asset_config.get("entry_rules", {}).get(
-                            "scalping", {}
-                        ).get("burst_scalping", {}).get(
-                            "closure_rules", {}
-                        ) or asset_config.get(
-                            "overrides", {}
-                        ).get(
-                            "scalping", {}
-                        ).get(
-                            "closure_rules", {}
+                        asset_closure = (
+                            asset_config.get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                .get("closure_rules", {})
+                            or asset_config.get("overrides", {})
+                                .get("scalping", {})
+                                .get("closure_rules", {})
                         )
 
                         if asset_closure:
@@ -1375,7 +1373,7 @@ def monitor_burst_baskets(
                                     f"[ASSET_CONFIG][{sym}] target_profit={asset_target_profit}p "
                                     f"(global={target_profit}p) | max_loss={asset_max_loss}p"
                                 )
-                        
+                        logger.warning(f"[TEST OVERRIDES] {sym} asset_target_profit={asset_target_profit} asset_max_loss={asset_max_loss}")
 
                 except Exception as e_asset:
                     if logger:
