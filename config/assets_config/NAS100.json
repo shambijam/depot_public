@@ -197,7 +197,7 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 800,
+          "pips": 50,
           "buffer_pips": 200,
           "atr_period": 14,
           "atr_multiplier": 0.0,
@@ -205,7 +205,7 @@
           "comment": "10 JAN 2026: 800 pips = 8 index points (NAS100 100x multiplier)"
         },
         "tp": {
-          "pips": 1200,
+          "pips": 20,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
@@ -217,7 +217,7 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 310,
+        "target_profit_pips": 11,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
