@@ -1294,7 +1294,10 @@ def monitor_burst_baskets(
     # =========================
     # Phase A — FAST (profit target)
     # =========================
-    target_profit = float(closure.get("target_profit_pips", 15.0))
+    # ⛔ IMPORTANT: target_profit global INTERDIT
+    # La valeur EFFECTIVE est asset_target_profit (calculée par actif)
+    target_profit = None
+
 
     if enable_profit_close and rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
         deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)
