@@ -1026,12 +1026,30 @@ def monitor_burst_baskets(
         return getattr(si, key, default)
 
     def _pip_size_for_symbol(sym: str) -> float:
-        """EURUSD/GBPUSD(digits=5)=>1 pip=10 pts ; XAUUSD(digits=2)=>1 pip=1 pt"""
-        si = _symbol_info(sym)
-        point = _safe_float(_gv(si, "point", 0.0001), 0.0001) or 0.0001
-        digits = int(_gv(si, "digits", 5) or 5)
-        points_per_pip = 10.0 if digits in (3, 5) else 1.0
-        return point * points_per_pip
+        """
+        Pip size robuste (gère suffixes MT5).
+        - Forex standard : 1 pip = 0.0001
+        - Forex JPY      : 1 pip = 0.01
+        - Indices        : 1 pip = 1.0 point
+        """
+
+        sym_u = (sym or "").upper()
+
+        # 1) Normaliser un "base symbol" (prend les 6 premières lettres si possible)
+        m = re.match(r"^([A-Z]{6})", sym_u)
+        base6 = m.group(1) if m else sym_u
+
+        # 2) Indices (tu peux ajouter/retirer des keywords selon ton broker)
+        if any(k in sym_u for k in ("NAS", "US30", "DJ", "DAX", "GER", "SPX", "SP500", "UK100")):
+            return 1.0
+
+        # 3) Forex JPY (important: utiliser base6, pas sym_u entier)
+        if base6.endswith("JPY"):
+            return 0.01
+
+        # 4) Forex standard
+        # (optionnel: si tu veux être strict -> vérifier base6 match [A-Z]{6})
+        return 0.0001
 
     def _current_price(pos):
         cp = _safe_float(_v(pos, "current_price"))
