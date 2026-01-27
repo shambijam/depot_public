@@ -1375,7 +1375,7 @@ def monitor_burst_baskets(
                                     f"[ASSET_CONFIG][{sym}] target_profit={asset_target_profit}p "
                                     f"(global={target_profit}p) | max_loss={asset_max_loss}p"
                                 )
-                        print(f"[DEBUG CLOSURE] {sym} asset_closure={asset_closure}")
+                        
 
                 except Exception as e_asset:
                     if logger:
