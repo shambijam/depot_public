@@ -235,20 +235,10 @@
           "comment": "08 JAN 2026: VETO trades après 50s (standard)"
         },
         "allowed_hours_gmt": [
-          0,
-          1,
-          2,
-          3,
-          4,
-          5,
-          6,
           7,
           8,
           9,
           10,
-          11,
-          12,
-          13,
           14,
           15,
           16,
@@ -257,8 +247,7 @@
           19,
           20,
           21,
-          22,
-          23
+          22
         ],
         "comment_hours": "08 JAN 2026 v2: 24/7 OUVERT - Triple Filtre protège naturellement contre range/accumulation",
         "min_tick_rate": 2.5,
