@@ -932,9 +932,7 @@ def monitor_burst_baskets(
     rt_poll_interval_ms = int(closure.get("rt_poll_interval_ms", 120))
     max_loss_pips = float(closure.get("max_loss_pips", float(max_loss_pips)))
     loss_guard_arming_ms = int(closure.get("loss_guard_arming_ms", 3000))
-    min_age_ms_for_any_close = int(
-        closure.get("min_age_ms_for_any_close", 0)
-    )
+    min_age_ms_for_any_close = int(closure.get("min_age_ms_for_any_close", 0))
     target_profit_pips = float(closure.get("target_profit_pips", 15.0))
 
     logger = getattr(self, "logger", None)
@@ -1039,16 +1037,20 @@ def monitor_burst_baskets(
         m = re.match(r"^([A-Z]{6})", sym_u)
         base6 = m.group(1) if m else sym_u
 
-        # 2) Indices (tu peux ajouter/retirer des keywords selon ton broker)
-        if any(k in sym_u for k in ("NAS", "US30", "DJ", "DAX", "GER", "SPX", "SP500", "UK100")):
+        # 2) Indices : détection stricte (évite USDJPY qui contient "DJ")
+        m_root = re.match(r"^([A-Z0-9]+)", sym_u)
+        root = m_root.group(1) if m_root else sym_u
+
+        if root.startswith(
+            ("NAS", "US30", "DJ30", "DJI", "DAX", "GER", "SPX", "SP500", "UK100")
+        ):
             return 1.0
 
-        # 3) Forex JPY (important: utiliser base6, pas sym_u entier)
+        # 3) Forex JPY
         if base6.endswith("JPY"):
             return 0.01
 
         # 4) Forex standard
-        # (optionnel: si tu veux être strict -> vérifier base6 match [A-Z]{6})
         return 0.0001
 
     def _current_price(pos):
@@ -1316,7 +1318,6 @@ def monitor_burst_baskets(
     # La valeur EFFECTIVE est asset_target_profit (calculée par actif)
     target_profit = None
 
-
     if enable_profit_close and rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
         deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)
         loop_count = 0
@@ -1372,14 +1373,16 @@ def monitor_burst_baskets(
                         asset_config = (
                             config_mgr.config_loader.load_asset_config(sym) or {}
                         )
-                        asset_closure = (
-                            asset_config.get("entry_rules", {})
-                                .get("scalping", {})
-                                .get("burst_scalping", {})
-                                .get("closure_rules", {})
-                            or asset_config.get("overrides", {})
-                                .get("scalping", {})
-                                .get("closure_rules", {})
+                        asset_closure = asset_config.get("entry_rules", {}).get(
+                            "scalping", {}
+                        ).get("burst_scalping", {}).get(
+                            "closure_rules", {}
+                        ) or asset_config.get(
+                            "overrides", {}
+                        ).get(
+                            "scalping", {}
+                        ).get(
+                            "closure_rules", {}
                         )
 
                         if asset_closure:
@@ -1394,7 +1397,9 @@ def monitor_burst_baskets(
                                     f"[ASSET_CONFIG][{sym}] target_profit={asset_target_profit}p "
                                     f"(global={target_profit}p) | max_loss={asset_max_loss}p"
                                 )
-                        logger.warning(f"[TEST OVERRIDES] {sym} asset_target_profit={asset_target_profit} asset_max_loss={asset_max_loss}")
+                        logger.warning(
+                            f"[TEST OVERRIDES] {sym} asset_target_profit={asset_target_profit} asset_max_loss={asset_max_loss}"
+                        )
 
                 except Exception as e_asset:
                     if logger:
