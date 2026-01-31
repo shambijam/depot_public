@@ -4075,13 +4075,40 @@ def scalping_worker(
                             filtre1_direction = "HOLD"
                             filtre1_confidence = 0.0
 
-                            if abs(delta_weighted) >= delta_threshold:
-                                if delta_weighted > 0:
-                                    filtre1_direction = "BUY"
-                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
-                                else:
+                            # ═══════════════════════════════════════════════════════════════
+                            # LOGIQUE ASYMÉTRIQUE : BUY = Delta, SELL = MTF
+                            # ═══════════════════════════════════════════════════════════════
+
+                            # BUY : Décidé par delta positif (inchangé, ultra fiable)
+                            if delta_weighted > 0 and abs(delta_weighted) >= delta_threshold:
+                                filtre1_direction = "BUY"
+                                filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+
+                            # SELL : Décidé par MTF (M5 + M1 obligatoirement BEARISH)
+                            elif mtf_verdict is not None:
+                                m5_bearish = mtf_verdict.m5_direction == "BEARISH"
+                                m1_bearish = mtf_verdict.m1_direction == "BEARISH"
+                                m15_bearish = mtf_verdict.m15_direction == "BEARISH"
+
+                                # Condition SELL : M5 ET M1 doivent être BEARISH
+                                if m5_bearish and m1_bearish:
                                     filtre1_direction = "SELL"
-                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                                    # Confidence basée sur alignement : 3/3 = 1.0, 2/3 = 0.7
+                                    if m15_bearish:
+                                        filtre1_confidence = 1.0  # Alignement parfait 3/3
+                                    else:
+                                        filtre1_confidence = 0.7  # Alignement M5+M1 seulement
+
+                            # HOLD : Ni BUY ni SELL validé
+                            # (reste à "HOLD" par défaut)
+
+                            # Log traçabilité SELL via MTF
+                            if filtre1_direction == "SELL":
+                                logger.info(
+                                    f"[FILTRE1_MTF][{asset}] 🔴 SELL décidé par MTF | "
+                                    f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
+                                    f"Confidence: {filtre1_confidence:.2f}"
+                                )
 
                             filtre1_status = "✅ PASS" if filtre1_direction in ["BUY", "SELL"] else "❌ FAIL"
                             filtre1_detail = f"Δw={delta_weighted:.1f} (M1:{delta_m1:.0f}×0.6 + M3:{delta_m3:.1f}×0.4) CVD:{cvd_slope:.2f} {'✅' if cvd_aligned else '❌'}"
