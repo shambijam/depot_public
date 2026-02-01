@@ -43,6 +43,7 @@ try:
     from utils.logger_setup import setup_production_logging
     from mecanique_generale.mecano import Mecano
     import MetaTrader5 as mt5
+    from start_dashboard import launch_integrated_dashboard
 except ImportError as e:
     logging.critical(
         f"ERREUR FATALE: Échec de l'importation d'un module de SNIPER_X. Assurez-vous que l'architecture des dossiers est correcte. Erreur: {e}",
@@ -5313,6 +5314,19 @@ def main(args: argparse.Namespace) -> None:
                 logger.info("Réconciliation TradeExecutor OK.")
                 # ✅ NE PAS DÉCONNECTER - Garder la connexion persistante pour les threads !
                 logger.info(f"✅ MT5 connecté et prêt (is_connected={mt5_connector.is_connected})")
+
+                # ✅ LANCEMENT DU DASHBOARD WEB EN TEMPS RÉEL
+                try:
+                    dashboard_thread = launch_integrated_dashboard(
+                        config_manager=config_manager,
+                        mt5_connector=mt5_connector,
+                        bot_mode=bot_mode,
+                        host='0.0.0.0',
+                        port=5000
+                    )
+                    logger.info("📊 Dashboard lancé sur http://localhost:5000")
+                except Exception as dash_err:
+                    logger.warning(f"⚠️ Dashboard non lancé (non bloquant): {dash_err}")
             else:
                 logger.critical("MT5 non connecté pour la réconciliation - ARRÊT DU BOT")
                 sys.exit(1)
