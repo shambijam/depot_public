@@ -15,7 +15,7 @@
             ],
             "account_type": "STANDARD",
             "trade_settings": {
-                "risk_per_trade_percent": 4.0,
+                "risk_per_trade_percent": 4.1,
                 "max_lot": 0.60,
                 "min_lot": 0.01,
                 "lot_step": 0.01
