@@ -250,7 +250,13 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
 
             # Infos position
             symbol = str(base_request.get("symbol", "UNKNOWN"))
-            direction = "BUY" if base_request.get("action") == "BUY" else "SELL"
+            # ✅ FIX (02 FEV 2026): Récupérer direction depuis trade_decision (pas action MT5 qui est un int)
+            trade_decision = base_request.get("trade_decision", {})
+            direction = str(trade_decision.get("action", "")).upper()
+            if direction not in ("BUY", "SELL"):
+                # Fallback: vérifier le type MT5 (ORDER_TYPE_BUY = 0, ORDER_TYPE_SELL = 1)
+                mt5_type = base_request.get("type", 1)
+                direction = "BUY" if mt5_type == 0 else "SELL"
             entry_price = float(base_request.get("price", 0.0))
             volume_per_ticket = float(base_request.get("volume", 0.0))
             volume_total = volume_per_ticket * len(
