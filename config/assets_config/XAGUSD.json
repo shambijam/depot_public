@@ -223,9 +223,9 @@
         "rt_poll_interval_ms": 100,
         "min_age_ms_for_any_close": 2000,
         "enable_loss_guard": true,
-        "max_loss_pips": 25.0,
+        "max_loss_pips": 75.0,
         "loss_guard_arming_ms": 3000,
-        "comment": "02 FEV 2026: 5 pips profit, 25 pips loss max pour XAGUSD"
+        "comment": "02 FEV 2026: max_loss_pips augmenté à 75 pour laisser respirer les trades XAGUSD"
       },
       "timing_gatekeeper": {
         "enabled": true,
