@@ -1035,6 +1035,8 @@ def monitor_burst_baskets(
         - Forex standard : 1 pip = 0.0001
         - Forex JPY      : 1 pip = 0.01
         - Indices        : 1 pip = 1.0 point
+        - XAUUSD (Or)    : 1 pip = 0.01
+        - XAGUSD (Argent): 1 pip = 0.001
         """
 
         sym_u = (sym or "").upper()
@@ -1052,11 +1054,17 @@ def monitor_burst_baskets(
         ):
             return 1.0
 
-        # 3) Forex JPY
+        # 3) Métaux précieux (XAUUSD, XAGUSD, etc.)
+        if root.startswith("XAU"):
+            return 0.01  # Or: point = 0.01, digits = 2
+        if root.startswith("XAG"):
+            return 0.001  # Argent: point = 0.001, digits = 3
+
+        # 4) Forex JPY
         if base6.endswith("JPY"):
             return 0.01
 
-        # 4) Forex standard
+        # 5) Forex standard
         return 0.0001
 
     def _current_price(pos):
