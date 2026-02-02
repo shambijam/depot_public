@@ -90,9 +90,9 @@ class PriceMemoryAnalyzer:
         asset_upper = asset.upper() if asset else ""
         # Métaux précieux
         if "XAG" in asset_upper:
-            return 0.00001  # 5 décimales pour XAGUSD
+            return 0.001  # 3 décimales pour XAGUSD (1 point = 0.001)
         elif "XAU" in asset_upper:
-            return 0.00001  # 5 décimales pour XAUUSD
+            return 0.01  # 2 décimales pour XAUUSD
         # Indices
         elif "US30" in asset_upper or "DOW" in asset_upper:
             return 0.01

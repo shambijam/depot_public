@@ -27,8 +27,8 @@
     "symbols": {
         "XAGUSD": {
             "enabled": true,
-            "digits": 5,
-            "point": 0.00001,
+            "digits": 3,
+            "point": 0.001,
             "contract_size": 5000,
             "min_lot": 0.01,
             "max_lot": 10.0,

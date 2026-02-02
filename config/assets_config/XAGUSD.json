@@ -1,7 +1,7 @@
 {
   "description": "Configuration institutionnelle pour XAGUSD (Argent/USD) - MODE SNIPER",
   "symbol": "XAGUSD",
-  "type": "commodity",
+  "type": "metal",
   "profile": "institutionnel",
   "last_updated": "2026-02-02",
   "volatility": {
@@ -41,10 +41,10 @@
     }
   },
   "symbol_info": {
-    "point": 0.00001,
-    "digits": 5,
+    "point": 0.001,
+    "digits": 3,
     "trade_contract_size": 5000,
-    "trade_tick_size": 0.00001
+    "trade_tick_size": 0.001
   },
   "strategy_toggles": {
     "scalping": true,
