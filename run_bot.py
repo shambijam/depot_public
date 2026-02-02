@@ -4557,6 +4557,31 @@ def scalping_worker(
                             logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
                             decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
+                        # ═══════════════════════════════════════════════════════════════
+                        # 🛡️ 02 FEV 2026: VÉRIFICATION COHÉRENCE MTF/SIGNAL
+                        # Si MTF BEARISH (2/3+) et Signal BUY → BLOQUER
+                        # Si MTF BULLISH (2/3+) et Signal SELL → BLOQUER
+                        # ═══════════════════════════════════════════════════════════════
+                        if mtf_verdict is not None and mtf_verdict.alignment_count >= 2:
+                            if mtf_direction == "BEARISH" and decision_mini["action"] == "BUY":
+                                logger.warning(
+                                    f"🛡️ [MTF_COHERENCE_BLOCK][{asset}] ❌ BUY BLOQUÉ | "
+                                    f"MTF={mtf_direction} ({mtf_verdict.alignment}) vs Signal=BUY | "
+                                    f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction}"
+                                )
+                                decision_mini["action"] = "HOLD"
+                                decision_mini["confidence"] = 0.0
+                                decision_mini["rationale"] = f"MTF BEARISH ({mtf_verdict.alignment}) bloque BUY - incohérence direction"
+                            elif mtf_direction == "BULLISH" and decision_mini["action"] == "SELL":
+                                logger.warning(
+                                    f"🛡️ [MTF_COHERENCE_BLOCK][{asset}] ❌ SELL BLOQUÉ | "
+                                    f"MTF={mtf_direction} ({mtf_verdict.alignment}) vs Signal=SELL | "
+                                    f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction}"
+                                )
+                                decision_mini["action"] = "HOLD"
+                                decision_mini["confidence"] = 0.0
+                                decision_mini["rationale"] = f"MTF BULLISH ({mtf_verdict.alignment}) bloque SELL - incohérence direction"
+
                         # Construction fusion_out (BRANCHE 3: PASS_NORMAL)
                         if decision_mini["action"] in ["BUY", "SELL"]:
                             anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
