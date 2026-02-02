@@ -4,7 +4,7 @@
   "version": "5.0-minimalist",
   "tradeable_assets": [
     "USDJPY",
-    "NAS100"
+    "XAGUSD"
   ],
   "magic_number": 52001,
   "advanced_scoring": {
@@ -277,7 +277,7 @@
       },
       "blocked_phases": {
         "enabled": false,
-        "description": "08 JAN 2026: DÉSACTIVÉ - Bloquait les vrais signaux (ex: 11 bougies rouges NAS100 = SELL évident bloqué par 'range_retail')",
+        "description": "08 JAN 2026: DÉSACTIVÉ - Bloquait les vrais signaux (ex: bougies rouges consécutives = SELL évident bloqué par 'range_retail')",
         "phases": [
           "range",
           "accumulation",

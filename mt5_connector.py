@@ -1898,7 +1898,7 @@ class MT5Connector:
             is_sell_flag = (flags & 64) > 0  # 0x40 = SELL
 
             # 🔍 DEBUG (24 Nov 2025): Log flags distribution
-            if symbol in ["USDJPY", "EURUSD"]:
+            if symbol in ["USDJPY", "XAGUSD"]:
                 self.logger.critical(f"[MT5_FLAGS][{symbol}] Flags sample (first 10): {flags.head(10).tolist()}")
                 self.logger.critical(
                     f"[MT5_FLAGS][{symbol}] "
@@ -1913,7 +1913,7 @@ class MT5Connector:
             )
 
             # 🔍 DEBUG (24 Nov 2025): Log side après flags
-            if symbol in ["USDJPY", "EURUSD"]:
+            if symbol in ["USDJPY", "XAGUSD"]:
                 side_after_flags = pd.Series(side).value_counts().to_dict()
                 self.logger.critical(f"[MT5_FLAGS][{symbol}] Side après flags 32/64: {side_after_flags}")
 
@@ -1942,7 +1942,7 @@ class MT5Connector:
                 side = tmp
 
                 # 🔍 DEBUG (24 Nov 2025): Log side après tick-rule
-                if symbol in ["USDJPY", "EURUSD"]:
+                if symbol in ["USDJPY", "XAGUSD"]:
                     side_after_tickrule = pd.Series(side).value_counts().to_dict()
                     self.logger.critical(
                         f"[MT5_TICKRULE][{symbol}] "
@@ -1973,7 +1973,7 @@ class MT5Connector:
                 side = tmp
 
                 # 🔍 DEBUG (08 JAN 2026): Log side après Fallback 2 (bits 1/2)
-                if symbol in ["USDJPY", "EURUSD"]:
+                if symbol in ["USDJPY", "XAGUSD"]:
                     side_after_bits = pd.Series(side).value_counts().to_dict()
                     flag1_alone = (is_ask_bit & ~is_bid_bit).sum()
                     flag2_alone = (is_bid_bit & ~is_ask_bit).sum()
@@ -1987,7 +1987,7 @@ class MT5Connector:
             df["side"] = side
 
             # 🔍 DEBUG (24 Nov 2025): Log side FINAL
-            if symbol in ["USDJPY", "EURUSD"]:
+            if symbol in ["USDJPY", "XAGUSD"]:
                 side_final = df["side"].value_counts().to_dict()
                 self.logger.critical(
                     f"[MT5_FINAL][{symbol}] "

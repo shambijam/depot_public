@@ -71,7 +71,7 @@
         "strategy_asset_mapping": {
           "scalping": [
             "USDJPY",
-            "NAS100"
+            "XAGUSD"
           ]
         }
       }
@@ -82,7 +82,7 @@
     "max_risk_per_trade_percent": 2,
     "max_total_risk_percent": 6,
     "global_allowed_symbols": [
-      "NAS100",
+      "XAGUSD",
       "USDJPY"
     ],
     "max_allowed_lot_size": 50.0

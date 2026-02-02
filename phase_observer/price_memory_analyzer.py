@@ -88,9 +88,12 @@ class PriceMemoryAnalyzer:
         Utilisé pour convertir le mouvement de prix en pips.
         """
         asset_upper = asset.upper() if asset else ""
+        # Métaux précieux
+        if "XAG" in asset_upper:
+            return 0.00001  # 5 décimales pour XAGUSD
+        elif "XAU" in asset_upper:
+            return 0.00001  # 5 décimales pour XAUUSD
         # Indices
-        if "NAS" in asset_upper or "US100" in asset_upper:
-            return 0.01  # 1 point = 0.01 pour NAS100
         elif "US30" in asset_upper or "DOW" in asset_upper:
             return 0.01
         elif "SP500" in asset_upper or "US500" in asset_upper:

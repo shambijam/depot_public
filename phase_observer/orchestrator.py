@@ -615,14 +615,14 @@ class PhaseObserver:
                 indices_symbols = (
                     set(
                         self.config_manager.get(
-                            "global_safety.indices_symbols", ["US30", "NAS100"]
+                            "global_safety.indices_symbols", ["US30"]
                         )
                     )
                     if getattr(self, "config_manager", None)
-                    else {"US30", "NAS100"}
+                    else {"US30"}
                 )
             except Exception:
-                indices_symbols = {"US30", "NAS100"}
+                indices_symbols = {"US30"}
 
             if (asset_symbol or "UNKNOWN_ASSET") in indices_symbols:
                 max_spread = (
