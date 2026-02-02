@@ -454,17 +454,20 @@ def _calculate_sl_tp_prices(
     soft_min_price = max(min_stop_price, min_ticks_soft * tick_size)
 
     # pips (digits 3/5 => 10 points/pip, sinon 1)
+    # Cette règle s'applique aussi aux métaux (XAU, XAG)
     points_per_pip = 10.0 if digits in (3, 5) else 1.0
     pip_size = point * points_per_pip
+
+    # Détection symbole pour la suite
+    symbol = str(
+        trade_decision.get("asset") or trade_decision.get("symbol") or ""
+    ).upper()
 
     # ---------- 2) Données marché, overrides ----------
     sl_pips_override = trade_decision.get("target_sl_pips")
     tp_pips_override = trade_decision.get("target_tp_pips")
     spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
 
-    symbol = str(
-        trade_decision.get("asset") or trade_decision.get("symbol") or ""
-    ).upper()
     try:
         rates_df = ((market_context or {}).get("market_data") or {}).get(symbol)
     except Exception:
@@ -1293,7 +1296,8 @@ def _split_multi_tp_orders(
     if point <= 0:
         raise TradeExecutionError("symbol_info.point invalide (<=0).")
 
-    # PIP sizing
+    # PIP sizing (digits 3/5 => 10 points/pip, sinon 1)
+    # Cette règle s'applique aussi aux métaux (XAU, XAG)
     points_per_pip = 10.0 if digits in (3, 5) else 1.0
     pip_size = point * points_per_pip
 

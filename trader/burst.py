@@ -1055,10 +1055,11 @@ def monitor_burst_baskets(
             return 1.0
 
         # 3) Métaux précieux (XAUUSD, XAGUSD, etc.)
+        # Convention: digits 3/5 = 10 points par pip (comme Forex)
         if root.startswith("XAU"):
-            return 0.01  # Or: point = 0.01, digits = 2
+            return 0.1  # Or: point = 0.01, digits = 2 → pip = 0.01 × 10 = 0.1
         if root.startswith("XAG"):
-            return 0.001  # Argent: point = 0.001, digits = 3
+            return 0.01  # Argent: point = 0.001, digits = 3 → pip = 0.001 × 10 = 0.01
 
         # 4) Forex JPY
         if base6.endswith("JPY"):
