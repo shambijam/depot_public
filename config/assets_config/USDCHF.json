@@ -1,40 +1,42 @@
 {
-  "description": "Configuration institutionnelle pour USDJPY - MODE SNIPER",
-  "symbol": "USDJPY",
+  "description": "Configuration institutionnelle pour USDCHF - MODE SNIPER",
+  "symbol": "USDCHF",
   "type": "forex",
   "profile": "institutionnel",
-  "last_updated": "2026-01-06",
+  "last_updated": "2026-02-03",
   "symbol_info": {
-    "point": 0.001,
-    "digits": 3,
-    "pip_position": 2,
-    "pip_value": 0.01,
+    "point": 0.00001,
+    "digits": 5,
+    "pip_position": 4,
+    "pip_value": 0.0001,
     "trade_contract_size": 100000,
-    "trade_tick_size": 0.001,
-    "comment": "Pour USDJPY: 1 pip = 0.01 (2ème décimale), vs 0.0001 pour EURUSD"
+    "trade_tick_size": 0.00001,
+    "comment": "USDCHF standard 5 digits: 1 pip = 0.0001 (4ème décimale)"
   },
   "volatility": {
     "expected_daily_range_percent": {
-      "value": 0.8,
+      "value": 0.6,
       "adaptive_range": {
-        "min": 0.5,
-        "max": 1.2,
+        "min": 0.4,
+        "max": 1.0,
         "adjustment_period_days": 30
       }
     },
     "max_allowed_spread_points": {
-      "base": 3,
+      "base": 12,
       "session_multipliers": {
-        "asia": 1.0,
-        "london": 1.2,
+        "asia": 1.3,
+        "london": 1.0,
         "new_york": 1.1
       },
       "news_spike_tolerance": 8,
-      "volatility_adjustment": true
+      "volatility_adjustment": true,
+      "comment": "12 points = 1.2 pips max spread (USDCHF spreads serrés)"
     },
     "min_tradable_range_points": {
-      "value": 2,
-      "dynamic_adjustment": true
+      "value": 20,
+      "dynamic_adjustment": true,
+      "comment": "20 points = 2 pips range minimum"
     }
   },
   "risk_management": {
@@ -59,30 +61,30 @@
   "overrides": {
     "scalping": {
       "burst_mode_overrides": {
-        "comment": "07 JAN 2026: Ajustements USDJPY pour les 4 modes de burst (deltas faibles)",
+        "comment": "03 FEV 2026: USDCHF similaire à USDJPY (deltas modérés, volatilité faible)",
         "niveau_2": {
-          "delta_momentum_min": 15.0,
-          "volume_confirmation_min": 8.0,
+          "delta_momentum_min": 18.0,
+          "volume_confirmation_min": 9.0,
           "imbalance_strength_min": 5.0,
           "composite_score_min": 62.0,
-          "comment": "USDJPY: Delta -5 pts, volume -2 pts, composite -3 pts (deltas 15 vs 100 EURUSD)"
+          "comment": "USDCHF: Deltas légèrement plus élevés que USDJPY"
         },
         "niveau_2_5": {
-          "delta_momentum_min": 12.0,
+          "delta_momentum_min": 14.0,
           "volume_confirmation_min": 8.0,
           "require_at_least_one": {
             "absorption_levels_min": 8.0,
             "order_clustering_min": 5.0,
             "tape_speed_ratio_min": 1.5
           },
-          "comment": "USDJPY: Seuils réduits (activité modérée, tape speed 1.5)"
+          "comment": "USDCHF: Seuils modérés (activité similaire USDJPY)"
         },
         "niveau_3": {
-          "delta_momentum_min": 12.0,
+          "delta_momentum_min": 14.0,
           "absorption_levels_min": 8.0,
           "order_clustering_min": 3.0,
           "composite_score_min": 64.0,
-          "comment": "USDJPY: Seuils adaptés à faible delta (niveau 3 recommandé)"
+          "comment": "USDCHF: Niveau 3 recommandé pour cet actif stable"
         },
         "niveau_4": {
           "composite_score_min": 66.0,
@@ -102,22 +104,22 @@
               "require_aligned": true
             }
           },
-          "comment": "USDJPY: Pénalités fatigue réduites (-1 pt), memory 48 (plus tolérant)"
+          "comment": "USDCHF: Filtres institutionnels standard"
         }
       },
       "footprint": {
-        "m1_min_ticks": 30,
+        "m1_min_ticks": 35,
         "m1_min_coverage_s": 5,
         "burst_tolerance": {
-          "tickrate_min": 1.5,
+          "tickrate_min": 1.8,
           "coverage_s_min_burst": 3
         },
-        "comment": "06 JAN 2026 MODE SNIPER: USDJPY activité modérée (30 ticks vs 50 EURUSD, 60 GBPUSD)"
+        "comment": "03 FEV 2026 MODE SNIPER: USDCHF activité modérée (35 ticks, entre USDJPY 30 et EURUSD 50)"
       },
       "fusion": {
-        "ttl_ms": 800,
-        "max_slippage_points": 50,
-        "comment": "50 points = 5 pips pour USDJPY (vs 0.5 pips)"
+        "ttl_ms": 700,
+        "max_slippage_points": 30,
+        "comment": "30 points = 3 pips slippage max pour USDCHF"
       },
       "orderflow_v6": {
         "enabled": true,
@@ -130,33 +132,33 @@
           "vwap_key": "vwap"
         },
         "lookback_bars": 8,
-        "cvd_slope_window": 7,
-        "comment_lookback": "06 JAN 2026 MODE SNIPER: lookback=8, cvd_slope=7 (plus long car USDJPY moins volatile, moins réactif)",
+        "cvd_slope_window": 6,
+        "comment_lookback": "03 FEV 2026 MODE SNIPER: lookback=8, cvd_slope=6 (USDCHF stable, fenêtres moyennes)",
         "features": {
           "delta": {
-            "abs_strong": 15.0,
-            "abs_extreme": 30.0,
-            "comment": "USDJPY a des deltas beaucoup plus faibles que EURUSD (15 vs 100)"
+            "abs_strong": 20.0,
+            "abs_extreme": 40.0,
+            "comment": "USDCHF deltas modérés (entre USDJPY 15 et EURUSD 100)"
           },
           "imbalance": {
             "min": 0.55,
             "extreme": 0.70,
-            "comment": "Seuils légèrement assouplis pour USDJPY"
+            "comment": "Seuils standards pour USDCHF"
           },
           "tickrate": {
-            "min": 1.5,
-            "burst_min": 3.0,
-            "coverage_s_min": 3,
-            "comment": "USDJPY : 1.5-3 ticks/sec (activité modérée)"
+            "min": 1.8,
+            "burst_min": 3.5,
+            "coverage_s_min": 4,
+            "comment": "USDCHF: 1.8-3.5 ticks/sec (activité modérée-haute)"
           },
           "vpoc": {
-            "drift_max_points": 10.0,
-            "comment": "10 points = 1 pip pour USDJPY (vs 15 points pour EURUSD)"
+            "drift_max_points": 15.0,
+            "comment": "15 points = 1.5 pips drift max VPOC"
           },
           "cvd": {
             "slope_window": 10,
             "slope_min": 0.0,
-            "comment": "06 JAN 2026 FIX: slope_window déprécié, utilisez cvd_slope_window au niveau orderflow_v6"
+            "comment": "slope_window déprécié, utilisez cvd_slope_window"
           },
           "vwap": {
             "confirm_window": 10
@@ -164,14 +166,14 @@
         },
         "divergence": {
           "enabled": true,
-          "lookback": 12,
+          "lookback": 10,
           "pivot_window": 2,
           "confirm_window": 3,
           "min_separation": 4,
           "min_price_move_frac": 0.0001,
           "min_indicator_move_frac": 0.0001,
           "add_exhaustion": true,
-          "comment": "06 JAN 2026 MODE SNIPER: lookback=12, pivot=2, confirm=3 (USDJPY moins réactif, peut utiliser fenêtres plus longues)"
+          "comment": "03 FEV 2026 MODE SNIPER: lookback=10 (USDCHF mouvements réguliers)"
         },
         "scoring": {
           "weights": {
@@ -182,61 +184,61 @@
             "vpoc": 0.05
           },
           "entry_threshold": 0.60,
-          "comment_deprecated": "ATTENTION: Ces poids sont OBSOLÈTES (ancien système). Utilisez 'scoring_weights' ci-dessous (06 JAN 2026)"
+          "comment_deprecated": "ATTENTION: Ces poids sont OBSOLÈTES. Utilisez 'scoring_weights'"
         },
         "scoring_weights": {
-          "comment": "✅ POIDS OPTIMISÉS MODE SNIPER (06 JAN 2026)",
+          "comment": "✅ POIDS OPTIMISÉS MODE SNIPER USDCHF (03 FEV 2026)",
           "comment_architecture": "Architecture: OrderFlow (50) + Footprint (30) + Triggers (20) = 100 pts max",
-          "delta_momentum_max": 22.0,
-          "volume_confirm_max": 16.0,
+          "delta_momentum_max": 24.0,
+          "volume_confirm_max": 14.0,
           "imbalance_strength_max": 12.0,
           "absorption_max": 14.0,
-          "clustering_max": 11.0,
-          "rejection_max": 5.0,
+          "clustering_max": 10.0,
+          "rejection_max": 6.0,
           "triggers_max": 20.0,
-          "comment_total": "Total: 22+16+12 (OrderFlow=50) + 14+11+5 (Footprint=30) + 20 (Triggers) = 100 pts",
-          "comment_sniper": "MODE SNIPER USDJPY: Delta +2 vs avant (22 vs 20), absorption +2 (14 vs 12). Volume -2, clustering -2 pour réactivité"
+          "comment_total": "Total: 24+14+12 (OrderFlow=50) + 14+10+6 (Footprint=30) + 20 (Triggers) = 100 pts",
+          "comment_sniper": "MODE SNIPER USDCHF: Delta fort (24), rejection +1 (mouvements propres)"
         },
         "sniper_mode": {
           "enabled": true,
           "max_trade_duration_seconds": 15,
-          "required_score_threshold": 82,
-          "delta_acceleration_min": 0.6,
-          "volume_spike_multiplier": 3.5,
+          "required_score_threshold": 80,
+          "delta_acceleration_min": 0.55,
+          "volume_spike_multiplier": 3.0,
           "allow_partial_fills": false,
           "max_spread_pips": 1.5,
-          "comment": "06 JAN 2026 NOUVEAU: Mode sniper trades <15s, score >82 (vs 85 EURUSD car deltas plus faibles), delta accélération 0.6"
+          "comment": "03 FEV 2026: USDCHF score 80 (spreads serrés permettent entrées plus fréquentes)"
         },
         "ncp_strong": {
-          "delta_abs_min": 15.0,
-          "tickrate_min": 1.5,
-          "comment": "Seuils NCP ajustés pour USDJPY (delta faible, tickrate modéré)"
+          "delta_abs_min": 18.0,
+          "tickrate_min": 1.8,
+          "comment": "Seuils NCP adaptés pour USDCHF"
         },
         "momentum_filter": {
           "enabled": true,
           "lookback_bars": 3,
-          "min_price_change_pips": 3.0,
-          "comment": "08 JAN 2026: VETO SELL si prix monte >3 pips sur 3 bougies, VETO BUY si prix descend >3 pips (seuil plus bas car USDJPY moins volatile)"
+          "min_price_change_pips": 3.5,
+          "comment": "03 FEV 2026: VETO si mouvement >3.5 pips contre direction sur 3 bougies"
         }
       },
       "entry_rules": {
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
-            "min_score": 60.0,
-            "comment_min_score": "08 JAN 2026: USDJPY score baissé 64→60 pour capter plus de trades 16h-17h GMT",
+            "min_score": 58.0,
+            "comment_min_score": "03 FEV 2026: USDCHF score 58 (mouvements propres, spreads serrés)",
             "of_v6_gate": {
-              "min_score": 0.70,
+              "min_score": 0.68,
               "require_ncp_strong": true,
-              "min_delta_abs": 15.0,
-              "min_imbalance": 0.60,
-              "min_tickrate": 1.5,
+              "min_delta_abs": 18.0,
+              "min_imbalance": 0.58,
+              "min_tickrate": 1.8,
               "require_one_of": {
                 "absorption_min": 8.0,
                 "clustering_min": 5.0,
                 "tape_speed_ratio_min": 1.5
               },
-              "comment": "07 JAN 2026 NIVEAU 2.5: Exige AU MOINS UN boost (absorption OU clustering OU tape speed)"
+              "comment": "03 FEV 2026: Gate USDCHF équilibré"
             },
             "flow_vol_gate": {
               "enabled": false
@@ -252,66 +254,62 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 20,
+          "pips": 18.0,
           "buffer_pips": 2,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "swing_lookback": 0,
-          "comment": "2.5 pips SL pour USDJPY (Option A - Conservateur, 06 JAN 2026)"
+          "comment": "03 FEV 2026: 18 pips SL pour USDCHF (légèrement moins que USDJPY car moins volatile)"
         },
         "tp": {
-          "pips": 30.0,
+          "pips": 27.0,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
             "min_sl_tp_distance_pips": 5
           },
-          "comment": "3.8 pips TP pour USDJPY (RR 1.5, Option A - Conservateur)"
+          "comment": "03 FEV 2026: 27 pips TP (RR 1.5)"
         }
       },
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 2.73,
+        "target_profit_pips": 2.5,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
         "min_age_ms_for_any_close": 2000,
         "enable_loss_guard": true,
-        "max_loss_pips": 15.0,
+        "max_loss_pips": 12.0,
         "loss_guard_arming_ms": 3000,
-        "comment": "06 JAN 2026: Sniper scalping <10s → Profit 1.8p, Loss 15p = ratio 1:8.3"
+        "comment": "03 FEV 2026: USDCHF Profit 2.5p, Loss 12p (ratio 1:4.8, spreads serrés)"
       },
       "timing_gatekeeper": {
         "enabled": true,
         "candle_timing_veto": {
           "enabled": true,
-          "max_candle_age_seconds": 52,
-          "comment": "07 JAN 2026: VETO trades après 52s (USDJPY plus permissif car moins volatile)"
+          "max_candle_age_seconds": 50,
+          "comment": "03 FEV 2026: VETO trades après 50s"
         },
         "allowed_hours_gmt": [
-          0,
-          1,
-          2,
-          3,
-          4,
-          5,
-          6,
           7,
           8,
           9,
+          10,
+          11,
+          12,
           13,
           14,
           15,
           16,
           17
         ],
-        "comment_hours": "06 JAN 2026 MODE SNIPER: Tokyo 0h-3h GMT + Londres 7h-10h GMT + Overlap Londres/NY 13h-17h GMT",
-        "min_tick_rate": 1.5,
+        "comment_hours": "03 FEV 2026: USDCHF optimal pendant Londres 7h-12h + Overlap NY 13h-17h (pas Tokyo car CHF européen)",
+        "min_tick_rate": 1.8,
         "min_coverage_s": 5.0,
         "max_tick_rate": 200.0,
         "max_spread_pips": 1.5,
-        "comment": "06 JAN 2026: min_coverage_s=5s pour fenêtre glissante 8s SCALPING SNIPER (analyse au scalpel). Spread max 1.5 pips USDJPY"
+        "comment": "03 FEV 2026: USDCHF tick_rate 1.8, max_spread 1.5 pips (spreads serrés)"
       }
     }
   }
