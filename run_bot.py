@@ -4558,29 +4558,37 @@ def scalping_worker(
                             decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
                         # ═══════════════════════════════════════════════════════════════
-                        # 🛡️ 02 FEV 2026: VÉRIFICATION COHÉRENCE MTF/SIGNAL
-                        # Si MTF BEARISH (2/3+) et Signal BUY → BLOQUER
-                        # Si MTF BULLISH (2/3+) et Signal SELL → BLOQUER
+                        # 🛡️ 02 FEV 2026: VÉRIFICATION ALIGNEMENT M5+M1 OBLIGATOIRE
+                        # Pour BUY  : M5 ET M1 doivent être BULLISH
+                        # Pour SELL : M5 ET M1 doivent être BEARISH
                         # ═══════════════════════════════════════════════════════════════
-                        if mtf_verdict is not None and mtf_verdict.alignment_count >= 2:
-                            if mtf_direction == "BEARISH" and decision_mini["action"] == "BUY":
+                        if mtf_verdict is not None and decision_mini["action"] in ["BUY", "SELL"]:
+                            m5_bullish = mtf_verdict.m5_direction == "BULLISH"
+                            m1_bullish = mtf_verdict.m1_direction == "BULLISH"
+                            m5_bearish = mtf_verdict.m5_direction == "BEARISH"
+                            m1_bearish = mtf_verdict.m1_direction == "BEARISH"
+
+                            # Pour BUY : M5 ET M1 doivent être BULLISH
+                            if decision_mini["action"] == "BUY" and not (m5_bullish and m1_bullish):
                                 logger.warning(
-                                    f"🛡️ [MTF_COHERENCE_BLOCK][{asset}] ❌ BUY BLOQUÉ | "
-                                    f"MTF={mtf_direction} ({mtf_verdict.alignment}) vs Signal=BUY | "
+                                    f"🛡️ [MTF_M5M1_BLOCK][{asset}] ❌ BUY BLOQUÉ | "
+                                    f"M5+M1 non alignés BULLISH | "
                                     f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction}"
                                 )
                                 decision_mini["action"] = "HOLD"
                                 decision_mini["confidence"] = 0.0
-                                decision_mini["rationale"] = f"MTF BEARISH ({mtf_verdict.alignment}) bloque BUY - incohérence direction"
-                            elif mtf_direction == "BULLISH" and decision_mini["action"] == "SELL":
+                                decision_mini["rationale"] = f"M5({mtf_verdict.m5_direction})+M1({mtf_verdict.m1_direction}) non alignés BULLISH - BUY bloqué"
+
+                            # Pour SELL : M5 ET M1 doivent être BEARISH
+                            elif decision_mini["action"] == "SELL" and not (m5_bearish and m1_bearish):
                                 logger.warning(
-                                    f"🛡️ [MTF_COHERENCE_BLOCK][{asset}] ❌ SELL BLOQUÉ | "
-                                    f"MTF={mtf_direction} ({mtf_verdict.alignment}) vs Signal=SELL | "
+                                    f"🛡️ [MTF_M5M1_BLOCK][{asset}] ❌ SELL BLOQUÉ | "
+                                    f"M5+M1 non alignés BEARISH | "
                                     f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction}"
                                 )
                                 decision_mini["action"] = "HOLD"
                                 decision_mini["confidence"] = 0.0
-                                decision_mini["rationale"] = f"MTF BULLISH ({mtf_verdict.alignment}) bloque SELL - incohérence direction"
+                                decision_mini["rationale"] = f"M5({mtf_verdict.m5_direction})+M1({mtf_verdict.m1_direction}) non alignés BEARISH - SELL bloqué"
 
                         # Construction fusion_out (BRANCHE 3: PASS_NORMAL)
                         if decision_mini["action"] in ["BUY", "SELL"]:
