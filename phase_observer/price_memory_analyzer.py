@@ -966,47 +966,70 @@ class PriceMemoryAnalyzer:
         """
         self._init_asset_history(asset)
 
-        # 🔧 16 JAN 2026: LOGIQUE STRICTE - JAMAIS NEUTRAL
-        # Une bougie est soit BEARISH soit BULLISH, POINT BARRE.
+        # 🔧 03 FEV 2026: ANALYSE TENDANCE MULTI-BOUGIES
+        # Regarde 2 bougies pour déterminer la tendance (adapté scalping)
+        # M15: 2 bougies (30min), M5: 2 bougies (10min), M1: 2 bougies (2min)
+
+        LOOKBACK_CANDLES = 2  # Nombre de bougies à analyser
 
         if candles is None or len(candles) < 1:
-            direction = 'BULLISH'
+            direction = 'NEUTRAL'
             net_pips = 0.0
             trend_clarity = 0.0
             if self.logger:
                 self.logger.warning(f"[MTF][{asset}][{timeframe}] PAS DE DONNÉES!")
         else:
+            # Prendre les N dernières bougies (ou moins si pas assez)
+            n_candles = min(LOOKBACK_CANDLES, len(candles))
+            recent_candles = candles.iloc[-n_candles:]
+
+            # Calculer le mouvement net du prix sur la période
+            point = self._get_point_size(asset)
+            first_open = float(recent_candles.iloc[0]['open'])
+            last_close = float(recent_candles.iloc[-1]['close'])
+            net_pips = (last_close - first_open) / point
+
+            # Compter les bougies vertes vs rouges
+            green_count = 0
+            red_count = 0
+            for _, c in recent_candles.iterrows():
+                c_open = float(c['open'])
+                c_close = float(c['close'])
+                if c_close > c_open:
+                    green_count += 1
+                elif c_close < c_open:
+                    red_count += 1
+
+            # Déterminer direction basée sur majorité ET mouvement net
+            # BEARISH: majorité rouge OU mouvement net négatif significatif
+            # BULLISH: majorité verte OU mouvement net positif significatif
+            if red_count > green_count or net_pips < -2:
+                direction = 'BEARISH'
+            elif green_count > red_count or net_pips > 2:
+                direction = 'BULLISH'
+            else:
+                # Égalité - regarder le mouvement net
+                if net_pips < 0:
+                    direction = 'BEARISH'
+                elif net_pips > 0:
+                    direction = 'BULLISH'
+                else:
+                    direction = 'NEUTRAL'
+
+            # Infos de la dernière bougie pour le log
             last_candle = candles.iloc[-1]
             candle_open = float(last_candle['open'])
             candle_close = float(last_candle['close'])
             candle_high = float(last_candle['high'])
             candle_low = float(last_candle['low'])
 
-            # Calculer le mouvement en pips de la dernière bougie
-            point = self._get_point_size(asset)
-            net_pips = (candle_close - candle_open) / point
-
-            # STRICTEMENT: close < open = BEARISH, sinon BULLISH
-            if candle_close < candle_open:
-                direction = 'BEARISH'
-            elif candle_close > candle_open:
-                direction = 'BULLISH'
-            else:
-                # Doji - regarder les 3 dernières bougies
-                if len(candles) >= 3:
-                    recent = candles.iloc[-3:]
-                    red_count = sum(1 for _, c in recent.iterrows() if float(c['close']) < float(c['open']))
-                    direction = 'BEARISH' if red_count >= 2 else 'BULLISH'
-                else:
-                    direction = 'BULLISH'
-
-            # 🔍 DEBUG: Log ce que le bot voit EXACTEMENT
+            # 🔍 DEBUG: Log avec analyse multi-bougies
             if self.logger:
-                color = "🔴" if direction == 'BEARISH' else "🟢"
+                color = "🔴" if direction == 'BEARISH' else ("🟢" if direction == 'BULLISH' else "⚪")
                 self.logger.info(
                     f"[MTF_CANDLE][{asset}][{timeframe}] {color} "
-                    f"O={candle_open:.5f} H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
-                    f"{'C<O' if candle_close < candle_open else 'C>O'} → {direction}"
+                    f"[{n_candles} bougies] 🟢{green_count} vs 🔴{red_count} | "
+                    f"Net: {net_pips:+.1f} pips | → {direction}"
                 )
 
             # Trend clarity
