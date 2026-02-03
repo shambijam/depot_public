@@ -4077,42 +4077,85 @@ def scalping_worker(
                             filtre1_confidence = 0.0
 
                             # ═══════════════════════════════════════════════════════════════
-                            # LOGIQUE ASYMÉTRIQUE : BUY = Delta, SELL = MTF
+                            # 🎯 03 FEV 2026: DELTA + CONFIRMATION MTF OBLIGATOIRE
+                            # BUY  = Delta+ ET MTF M5+M1 BULLISH (ou M15+M5+M1 BULLISH)
+                            # SELL = Delta- ET MTF M5+M1 BEARISH (ou M15+M5+M1 BEARISH)
                             # ═══════════════════════════════════════════════════════════════
 
-                            # BUY : Décidé par delta positif (inchangé, ultra fiable)
+                            # Extraire directions MTF
+                            m15_dir = mtf_verdict.m15_direction if mtf_verdict else "NO_DATA"
+                            m5_dir = mtf_verdict.m5_direction if mtf_verdict else "NO_DATA"
+                            m1_dir = mtf_verdict.m1_direction if mtf_verdict else "NO_DATA"
+
+                            # Check alignements MTF
+                            m5_m1_bullish = (m5_dir == "BULLISH" and m1_dir == "BULLISH")
+                            m5_m1_bearish = (m5_dir == "BEARISH" and m1_dir == "BEARISH")
+                            m15_aligned_bullish = (m15_dir == "BULLISH")
+                            m15_aligned_bearish = (m15_dir == "BEARISH")
+
+                            # BUY : Delta+ ET MTF confirme BULLISH (M5+M1)
                             if delta_weighted > 0 and abs(delta_weighted) >= delta_threshold:
-                                filtre1_direction = "BUY"
-                                filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                                if m5_m1_bullish:
+                                    filtre1_direction = "BUY"
+                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                                    # Boost si 3/3 aligné
+                                    if m15_aligned_bullish:
+                                        filtre1_confidence = min(1.0, filtre1_confidence + 0.15)
+                                    logger.info(
+                                        f"[MTF_CONFIRM][{asset}] ✅ BUY confirmé | "
+                                        f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                                    )
+                                else:
+                                    # Delta+ mais MTF pas BULLISH → REFUS
+                                    logger.warning(
+                                        f"[MTF_CONFIRM][{asset}] ❌ BUY REFUSÉ - MTF non BULLISH | "
+                                        f"Delta={delta_weighted:.1f} mais M5:{m5_dir} M1:{m1_dir} (requis: BULLISH)"
+                                    )
+                                    filtre1_direction = "HOLD"
+                                    filtre1_confidence = 0.0
 
-                            # SELL : Décidé par MTF (M5 + M1 obligatoirement BEARISH)
-                            elif mtf_verdict is not None:
-                                m5_bearish = mtf_verdict.m5_direction == "BEARISH"
-                                m1_bearish = mtf_verdict.m1_direction == "BEARISH"
-                                m15_bearish = mtf_verdict.m15_direction == "BEARISH"
-
-                                # Condition SELL : M5 ET M1 doivent être BEARISH
-                                if m5_bearish and m1_bearish:
+                            # SELL : Delta- ET MTF confirme BEARISH (M5+M1)
+                            elif delta_weighted < 0 and abs(delta_weighted) >= delta_threshold:
+                                if m5_m1_bearish:
                                     filtre1_direction = "SELL"
-                                    # Confidence basée sur alignement : 3/3 = 1.0, 2/3 = 0.7
-                                    if m15_bearish:
-                                        filtre1_confidence = 1.0  # Alignement parfait 3/3
-                                    else:
-                                        filtre1_confidence = 0.7  # Alignement M5+M1 seulement
+                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                                    # Boost si 3/3 aligné
+                                    if m15_aligned_bearish:
+                                        filtre1_confidence = min(1.0, filtre1_confidence + 0.15)
+                                    logger.info(
+                                        f"[MTF_CONFIRM][{asset}] ✅ SELL confirmé | "
+                                        f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                                    )
+                                else:
+                                    # Delta- mais MTF pas BEARISH → REFUS
+                                    logger.warning(
+                                        f"[MTF_CONFIRM][{asset}] ❌ SELL REFUSÉ - MTF non BEARISH | "
+                                        f"Delta={delta_weighted:.1f} mais M5:{m5_dir} M1:{m1_dir} (requis: BEARISH)"
+                                    )
+                                    filtre1_direction = "HOLD"
+                                    filtre1_confidence = 0.0
+
+                            # SELL via MTF seul (si delta faible mais MTF fort BEARISH)
+                            elif mtf_verdict is not None and m5_m1_bearish:
+                                filtre1_direction = "SELL"
+                                if m15_aligned_bearish:
+                                    filtre1_confidence = 0.85  # 3/3 BEARISH
+                                else:
+                                    filtre1_confidence = 0.70  # 2/3 BEARISH
+                                logger.info(
+                                    f"[MTF_CONFIRM][{asset}] ✅ SELL via MTF (delta faible) | "
+                                    f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                                )
 
                             # HOLD : Ni BUY ni SELL validé
-                            # (reste à "HOLD" par défaut)
-
-                            # Log traçabilité SELL via MTF
-                            if filtre1_direction == "SELL":
-                                logger.info(
-                                    f"[FILTRE1_MTF][{asset}] 🔴 SELL décidé par MTF | "
-                                    f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
-                                    f"Confidence: {filtre1_confidence:.2f}"
+                            else:
+                                logger.debug(
+                                    f"[MTF_CONFIRM][{asset}] ⏸️ HOLD - Pas de signal valide | "
+                                    f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
                                 )
 
                             filtre1_status = "✅ PASS" if filtre1_direction in ["BUY", "SELL"] else "❌ FAIL"
-                            filtre1_detail = f"Δw={delta_weighted:.1f} (M1:{delta_m1:.0f}×0.6 + M3:{delta_m3:.1f}×0.4) CVD:{cvd_slope:.2f} {'✅' if cvd_aligned else '❌'}"
+                            filtre1_detail = f"Δw={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} | CVD:{cvd_slope:.2f}"
 
                             # ═══════════════════════════════════════════════════════════
                             # FILTRE 2: MICROSTRUCTURE
