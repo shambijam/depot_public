@@ -2,7 +2,7 @@
 """
 Script de validation Phase 2 - Verifie que ConfigMerger produit la bonne structure.
 
-Checks pour chaque asset (XAGUSD, USDJPY):
+Checks pour chaque asset (USDCHF, USDJPY):
 1. closure_rules est a entry_rules.scalping.burst_scalping.closure_rules (PAS a la racine)
 2. closure_rules.target_profit_pips correspond a la valeur du JSON asset
 3. closure_rules.max_loss_pips est correct
@@ -37,13 +37,13 @@ def run_checks():
     cm = ConfigManager()
     merger = cm.config_merger
 
-    # Expected values per asset (seulement XAGUSD et USDJPY)
+    # Expected values per asset (seulement USDCHF et USDJPY)
     expected = {
-        "XAGUSD": {
-            "target_profit_pips": 5.0,
-            "max_loss_pips": 25.0,
-            "sl_pips": 10.0,
-            "tp_pips": 15.0,
+        "USDCHF": {
+            "target_profit_pips": 2.5,
+            "max_loss_pips": 12.0,
+            "sl_pips": 18.0,
+            "tp_pips": 27.0,
         },
         "USDJPY": {
             "target_profit_pips": 1.23,

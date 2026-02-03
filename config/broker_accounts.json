@@ -10,7 +10,7 @@
             "is_active": true,
             "priority": 1,
             "allowed_symbols": [
-                "XAGUSD",
+                "USDCHF",
                 "USDJPY"
             ],
             "account_type": "STANDARD",
@@ -25,15 +25,15 @@
     "default_live_account": "pepperstone_demo",
     "default_demo_account": "pepperstone_demo",
     "symbols": {
-        "XAGUSD": {
+        "USDCHF": {
             "enabled": true,
-            "digits": 3,
-            "point": 0.001,
-            "contract_size": 5000,
+            "digits": 5,
+            "point": 0.00001,
+            "contract_size": 100000,
             "min_lot": 0.01,
-            "max_lot": 10.0,
+            "max_lot": 100.0,
             "lot_step": 0.01,
-            "spread_points": 40
+            "spread_points": 15
         },
         "USDJPY": {
             "enabled": true,

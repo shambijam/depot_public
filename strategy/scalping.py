@@ -602,8 +602,8 @@ class ScalpingStrategy(BaseStrategy):
                         total_count = len(ticks_df)
                         unknown_count = total_count - buy_count - sell_count
 
-                        # 🔍 DEBUG (08 JAN 2026): Log calcul delta pour USDJPY/XAGUSD
-                        if asset in ["USDJPY", "XAGUSD"]:
+                        # 🔍 DEBUG (08 JAN 2026): Log calcul delta pour USDJPY/USDCHF
+                        if asset in ["USDJPY", "USDCHF"]:
                             self.logger.critical(
                                 f"[DELTA_CALC][{asset}] "
                                 f"BUY_volume={buy_volume:.1f} ({buy_count} ticks) | "

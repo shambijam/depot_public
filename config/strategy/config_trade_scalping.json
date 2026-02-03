@@ -4,7 +4,7 @@
   "version": "5.0-minimalist",
   "tradeable_assets": [
     "USDJPY",
-    "XAGUSD"
+    "USDCHF"
   ],
   "magic_number": 52001,
   "advanced_scoring": {
