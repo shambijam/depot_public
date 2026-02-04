@@ -4,11 +4,12 @@ SNIPER_X Telegram Bot Controller
 Module de contrôle à distance du bot via Telegram.
 
 Commandes disponibles:
-- /status    : Voir le statut du bot
+- /status    : Voir le statut du bot (+ état pause)
 - /positions : Voir les positions ouvertes
 - /balance   : Voir le solde du compte
-- /stop      : Arrêter le bot
-- /start_bot : Démarrer le bot
+- /pause     : Mettre en pause le trading (pas de nouveaux trades)
+- /resume    : Reprendre le trading
+- /stop      : Arrêter le bot complètement
 - /close_all : Fermer toutes les positions
 - /help      : Afficher l'aide
 
@@ -67,6 +68,9 @@ class TelegramBotController:
         self._bot_running = True
         self._stop_callback: Optional[Callable] = None
         self._start_callback: Optional[Callable] = None
+        self._pause_callback: Optional[Callable] = None
+        self._resume_callback: Optional[Callable] = None
+        self._is_paused_callback: Optional[Callable] = None
 
         # Application Telegram
         self._app: Optional[Application] = None
@@ -82,11 +86,17 @@ class TelegramBotController:
     def set_callbacks(
         self,
         stop_callback: Optional[Callable] = None,
-        start_callback: Optional[Callable] = None
+        start_callback: Optional[Callable] = None,
+        pause_callback: Optional[Callable] = None,
+        resume_callback: Optional[Callable] = None,
+        is_paused_callback: Optional[Callable] = None
     ):
-        """Définit les callbacks pour arrêter/démarrer le bot."""
+        """Définit les callbacks pour arrêter/démarrer/pause/resume le bot."""
         self._stop_callback = stop_callback
         self._start_callback = start_callback
+        self._pause_callback = pause_callback
+        self._resume_callback = resume_callback
+        self._is_paused_callback = is_paused_callback
 
     def _is_authorized(self, chat_id: int) -> bool:
         """Vérifie si le chat_id est autorisé."""
@@ -128,8 +138,9 @@ class TelegramBotController:
 /summary - Résumé complet
 
 ⚙️ *Contrôle*
-/stop - Arrêter le bot
-/start\\_bot - Démarrer le bot
+/pause - Mettre en pause le trading
+/resume - Reprendre le trading
+/stop - Arrêter le bot complètement
 /close\\_all - Fermer toutes les positions
 
 ❓ *Aide*
@@ -149,6 +160,10 @@ class TelegramBotController:
         try:
             status = "🟢 EN COURS" if self._bot_running else "🔴 ARRÊTÉ"
 
+            # Vérifier l'état de pause
+            is_paused = self._is_paused_callback() if self._is_paused_callback else False
+            trading_status = "⏸️ EN PAUSE" if is_paused else "▶️ ACTIF"
+
             mt5_status = "❓ Non connecté"
             if self.mt5_connector:
                 try:
@@ -164,6 +179,7 @@ class TelegramBotController:
 📊 *Statut SNIPER_X*
 
 🤖 Bot: {status}
+📈 Trading: {trading_status}
 📡 MT5: {mt5_status}
 ⏰ Heure: `{datetime.now(UTC).strftime('%H:%M:%S UTC')}`
             """
@@ -301,6 +317,55 @@ class TelegramBotController:
             await update.message.reply_text(f"❌ Erreur lors du démarrage: {e}")
 
     @_auth_required
+    async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Met en pause le trading (pas de nouveaux trades)."""
+        try:
+            # Vérifier si déjà en pause
+            if self._is_paused_callback and self._is_paused_callback():
+                await update.message.reply_text("ℹ️ Le trading est déjà en pause.")
+                return
+
+            if self._pause_callback:
+                self._pause_callback()
+                await update.message.reply_text(
+                    "⏸️ *Trading en PAUSE*\n\n"
+                    "• Aucun nouveau trade ne sera ouvert\n"
+                    "• Les positions existantes restent ouvertes\n"
+                    "• Le bot reste connecté\n\n"
+                    "Utilisez /resume pour reprendre.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text("⚠️ Callback pause non configuré.")
+
+        except Exception as e:
+            self.logger.error(f"Erreur cmd_pause: {e}")
+            await update.message.reply_text(f"❌ Erreur: {e}")
+
+    @_auth_required
+    async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reprend le trading après une pause."""
+        try:
+            # Vérifier si pas en pause
+            if self._is_paused_callback and not self._is_paused_callback():
+                await update.message.reply_text("ℹ️ Le trading n'est pas en pause.")
+                return
+
+            if self._resume_callback:
+                self._resume_callback()
+                await update.message.reply_text(
+                    "▶️ *Trading REPRIS*\n\n"
+                    "Le bot reprend le trading normalement.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text("⚠️ Callback resume non configuré.")
+
+        except Exception as e:
+            self.logger.error(f"Erreur cmd_resume: {e}")
+            await update.message.reply_text(f"❌ Erreur: {e}")
+
+    @_auth_required
     async def cmd_close_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Ferme toutes les positions ouvertes."""
         try:
@@ -388,6 +453,8 @@ class TelegramBotController:
         self._app.add_handler(CommandHandler("summary", self.cmd_summary))
         self._app.add_handler(CommandHandler("stop", self.cmd_stop))
         self._app.add_handler(CommandHandler("start_bot", self.cmd_start_bot))
+        self._app.add_handler(CommandHandler("pause", self.cmd_pause))
+        self._app.add_handler(CommandHandler("resume", self.cmd_resume))
         self._app.add_handler(CommandHandler("close_all", self.cmd_close_all))
         self._app.add_handler(CommandHandler("confirm_close", self.cmd_confirm_close))
 

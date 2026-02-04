@@ -3100,7 +3100,8 @@ def scalping_worker(
     strategy_manager,
     is_dry_run: bool,
     stop_event: threading.Event,
-    logger
+    logger,
+    pause_event: threading.Event = None  # 04 FEV 2026: Support pause/resume Telegram
 ):
     """
     🎯 Worker thread dédié au SCALPING pour un asset spécifique (31 DEC 2025)
@@ -3210,6 +3211,11 @@ def scalping_worker(
         cycle_count += 1
         cycle_start = time.time()
         global_state.increment_cycle(asset)
+
+        # ⏸️ PAUSE CHECK (04 FEV 2026): Si en pause, skip le trading mais reste vivant
+        if pause_event and pause_event.is_set():
+            time.sleep(cycle_interval)
+            continue
 
         try:
             # ⚡ VÉRIFICATION SYMBOL (03 JAN 2026): Protection contre symbol non disponible
@@ -5481,7 +5487,10 @@ def main(args: argparse.Namespace) -> None:
     dashboard_stop_event = threading.Event()
     basket_monitor_stop_event = threading.Event()
 
-    # ✅ CONNEXION TELEGRAM CONTROLLER AUX STOP EVENTS (04 FEV 2026)
+    # ⏸️ Event pour pause/resume trading via Telegram (04 FEV 2026)
+    trading_pause_event = threading.Event()  # Non-set = trading actif, Set = en pause
+
+    # ✅ CONNEXION TELEGRAM CONTROLLER AUX STOP/PAUSE EVENTS (04 FEV 2026)
     if telegram_controller:
         def telegram_stop_callback():
             """Callback appelé par /stop Telegram pour arrêter le bot."""
@@ -5491,8 +5500,29 @@ def main(args: argparse.Namespace) -> None:
             basket_monitor_stop_event.set()
             config_manager.send_alert("🛑 Bot arrêté via commande Telegram /stop", "telegram_critical")
 
-        telegram_controller.set_callbacks(stop_callback=telegram_stop_callback)
-        logger.info("✅ Telegram Controller connecté aux stop events")
+        def telegram_pause_callback():
+            """Callback appelé par /pause Telegram pour mettre en pause le trading."""
+            logger.info("⏸️ Pause trading demandée via Telegram!")
+            trading_pause_event.set()
+            config_manager.send_alert("⏸️ Trading en PAUSE via Telegram", "telegram_critical")
+
+        def telegram_resume_callback():
+            """Callback appelé par /resume Telegram pour reprendre le trading."""
+            logger.info("▶️ Reprise trading demandée via Telegram!")
+            trading_pause_event.clear()
+            config_manager.send_alert("▶️ Trading REPRIS via Telegram", "telegram_critical")
+
+        def telegram_is_paused():
+            """Retourne True si le trading est en pause."""
+            return trading_pause_event.is_set()
+
+        telegram_controller.set_callbacks(
+            stop_callback=telegram_stop_callback,
+            pause_callback=telegram_pause_callback,
+            resume_callback=telegram_resume_callback,
+            is_paused_callback=telegram_is_paused
+        )
+        logger.info("✅ Telegram Controller connecté aux stop/pause events")
 
     # ✅ Créer les 3 threads scalping (staggered timing)
     thread_usdjpy = threading.Thread(
@@ -5511,7 +5541,8 @@ def main(args: argparse.Namespace) -> None:
             strategy_manager,
             is_dry_run,
             scalping_stop_event,
-            logger
+            logger,
+            trading_pause_event          # 04 FEV 2026: pause/resume Telegram
         ),
         daemon=True,
         name="ScalpingWorker-USDJPY"
@@ -5533,7 +5564,8 @@ def main(args: argparse.Namespace) -> None:
             strategy_manager,
             is_dry_run,
             scalping_stop_event,
-            logger
+            logger,
+            trading_pause_event          # 04 FEV 2026: pause/resume Telegram
         ),
         daemon=True,
         name="ScalpingWorker-USDCHF"
