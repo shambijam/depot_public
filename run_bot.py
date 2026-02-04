@@ -118,22 +118,23 @@ def load_and_verify_environment(
         )
         sys.exit(1)
 
-    telegram_token = config_manager.get("env_vars.TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = config_manager.get("env_vars.TELEGRAM_CHAT_ID")
+    # Chercher le token dans telegram.bot_token OU env_vars.TELEGRAM_BOT_TOKEN
+    telegram_token = config_manager.get("telegram.bot_token") or config_manager.get("env_vars.TELEGRAM_BOT_TOKEN")
+    telegram_chat_ids = config_manager.get("telegram.authorized_chat_ids") or []
+    telegram_chat_id = config_manager.get("env_vars.TELEGRAM_CHAT_ID") or (telegram_chat_ids[0] if telegram_chat_ids else None)
 
     if not (telegram_token and telegram_chat_id):
         telegram_globally_enabled = config_manager.get("telegram.enabled", False)
         if telegram_globally_enabled:
-            logger.critical(
-                "FATAL: Le bot token ou l'ID de chat Telegram est manquant. Les notifications sont critiques pour le monitoring quand activées. Sortie du bot."
+            logger.warning(
+                "Telegram est active mais token/chat_id manquant. Verifiez telegram_config.json. Le bot continue sans Telegram."
             )
-            sys.exit(1)
         else:
             logger.warning(
-                "Les notifications Telegram sont globalement désactivées et les identifiants ne sont pas définis. Le bot continue sans alertes Telegram."
+                "Les notifications Telegram sont globalement desactivees. Le bot continue sans alertes Telegram."
             )
     else:
-        logger.info("Identifiants Telegram chargés.")
+        logger.info("Identifiants Telegram charges.")
 
     logger.info(
         "Vérification de la configuration et de l'environnement terminée avec succès."
