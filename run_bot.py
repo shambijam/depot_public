@@ -5407,6 +5407,8 @@ def main(args: argparse.Namespace) -> None:
 
                 # ✅ LANCEMENT DU TELEGRAM BOT CONTROLLER (04 FEV 2026)
                 # Permet de contrôler le bot à distance via Telegram
+                # Note: les callbacks seront configurés après la création des stop_events
+                telegram_controller = None
                 try:
                     from core.telegram_bot import create_telegram_controller
                     telegram_controller = create_telegram_controller(
@@ -5478,6 +5480,19 @@ def main(args: argparse.Namespace) -> None:
     scalping_stop_event = threading.Event()
     dashboard_stop_event = threading.Event()
     basket_monitor_stop_event = threading.Event()
+
+    # ✅ CONNEXION TELEGRAM CONTROLLER AUX STOP EVENTS (04 FEV 2026)
+    if telegram_controller:
+        def telegram_stop_callback():
+            """Callback appelé par /stop Telegram pour arrêter le bot."""
+            logger.info("🛑 Arrêt demandé via Telegram!")
+            scalping_stop_event.set()
+            dashboard_stop_event.set()
+            basket_monitor_stop_event.set()
+            config_manager.send_alert("🛑 Bot arrêté via commande Telegram /stop", "telegram_critical")
+
+        telegram_controller.set_callbacks(stop_callback=telegram_stop_callback)
+        logger.info("✅ Telegram Controller connecté aux stop events")
 
     # ✅ Créer les 3 threads scalping (staggered timing)
     thread_usdjpy = threading.Thread(
