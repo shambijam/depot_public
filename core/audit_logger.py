@@ -402,17 +402,29 @@ class AuditLogger:
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
+            # Nettoyer le message pour eviter les erreurs Markdown
+            # Remplacer ** par * (Telegram utilise *bold* pas **bold**)
+            clean_message = message.replace("**", "*")
+
             for chat_id in chat_ids:
                 try:
                     payload = {
                         "chat_id": chat_id,
-                        "text": message,
+                        "text": clean_message,
                         "parse_mode": parse_mode
                     }
                     response = requests.post(url, json=payload, timeout=10)
 
                     if response.status_code == 200:
                         self.logger.info(f"Alerte Telegram envoyée ({alert_type}) à {chat_id}")
+                    elif response.status_code == 400:
+                        # Réessayer sans parse_mode si erreur de formatage
+                        payload_plain = {"chat_id": chat_id, "text": message}
+                        response2 = requests.post(url, json=payload_plain, timeout=10)
+                        if response2.status_code == 200:
+                            self.logger.info(f"Alerte Telegram envoyée (plain) à {chat_id}")
+                        else:
+                            self.logger.warning(f"Erreur Telegram API: {response2.text}")
                     else:
                         self.logger.warning(f"Erreur Telegram API: {response.status_code} - {response.text}")
 
