@@ -966,11 +966,11 @@ class PriceMemoryAnalyzer:
         """
         self._init_asset_history(asset)
 
-        # 🔧 03 FEV 2026: ANALYSE TENDANCE MULTI-BOUGIES
-        # Regarde 2 bougies pour déterminer la tendance (adapté scalping)
-        # M15: 2 bougies (30min), M5: 2 bougies (10min), M1: 2 bougies (2min)
+        # 🔧 04 FEV 2026: ANALYSE TENDANCE DERNIÈRE BOUGIE
+        # Regarde 1 seule bougie (la dernière) pour déterminer la tendance
+        # Plus réactif pour le scalping
 
-        LOOKBACK_CANDLES = 2  # Nombre de bougies à analyser
+        LOOKBACK_CANDLES = 1  # Nombre de bougies à analyser
 
         if candles is None or len(candles) < 1:
             direction = 'NEUTRAL'
