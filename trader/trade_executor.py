@@ -276,6 +276,22 @@ class TradeExecutor:
         except Exception:
             pass
 
+        # Notification Telegram
+        try:
+            if summary["status"] in ("sent", "filled"):
+                action_type = "BUY" if request.get("type") == 0 else "SELL"
+                msg = (
+                    f"🚀 *Trade Execute*\n"
+                    f"Symbol: `{symbol}`\n"
+                    f"Action: `{action_type}`\n"
+                    f"Volume: `{volume}` lots\n"
+                    f"Prix: `{price}`\n"
+                    f"Ticket: `{order or deal}`"
+                )
+                self.config_manager.send_alert(msg, "telegram_trade_confirmed")
+        except Exception as e:
+            self.logger.debug(f"Notification Telegram non envoyee: {e}")
+
         return summary
 
 

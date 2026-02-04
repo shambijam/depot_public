@@ -360,12 +360,11 @@ class AuditLogger:
 
     def queue_or_send_alert(self, message: str, alert_type: str) -> None:
         """
-        Met en file d'attente ou envoie immédiatement une alerte, selon le type.
-        Cette méthode centralise la logique d'envoi d'alertes vers des services externes (ex: Telegram).
+        Envoie une alerte via Telegram.
 
         Args:
             message (str): Le message de l'alerte.
-            alert_type (str): Le type de l'alerte (ex: 'telegram_critical', 'telegram_market_phase').
+            alert_type (str): Le type de l'alerte (ex: 'telegram_critical', 'telegram_trade_confirmed').
         """
         self.logger.debug(f"AuditLogger reçu alerte de type '{alert_type}': {message[:100]}...")
 
@@ -373,38 +372,57 @@ class AuditLogger:
             self.logger.warning("AuditLogger ne peut pas envoyer d'alertes : ConfigManager n'est pas lié.")
             return
 
-        telegram_config = self.config_manager.get("telegram", {}) # Récupère la config Telegram complète
+        telegram_config = self.config_manager.get("telegram", {})
         telegram_enabled = telegram_config.get("enabled", False)
-        
+
         if not telegram_enabled:
-            self.logger.debug(f"Alerte de type '{alert_type}' ignorée : Telegram est désactivé dans la configuration.")
+            self.logger.debug(f"Alerte de type '{alert_type}' ignorée : Telegram est désactivé.")
             return
 
+        # Vérifier si ce type d'alerte est activé
         channels = telegram_config.get("channels", {})
-        target_channel_id = channels.get(alert_type) # Ex: "telegram_critical" -> "YOUR_CRITICAL_CHAT_ID"
+        channel_enabled = channels.get(alert_type, False)
 
-        if not target_channel_id:
-            self.logger.warning(f"Aucun ID de canal Telegram configuré pour le type d'alerte '{alert_type}'. Alerte non envoyée.")
+        if not channel_enabled:
+            self.logger.debug(f"Canal '{alert_type}' désactivé dans la config.")
             return
 
-        # Ici, la logique réelle d'envoi à Telegram doit être implémentée.
-        # Pour l'instant, c'est un placeholder.
-        # Vous devrez connecter ceci à un module d'envoi Telegram réel.
-        try:
-            # Exemple de placeholder pour l'envoi (vous devrez remplacer ceci par l'intégration Telegram réelle)
-            # if self.telegram_sender_instance: # Si vous aviez une instance d'un client Telegram ici
-            #    self.telegram_sender_instance.send_message(target_channel_id, message, parse_mode=telegram_config.get("parse_mode", "Markdown"))
-            self.logger.info(f"Alerte envoyée (simulée) vers Telegram Channel ID '{target_channel_id}' pour type '{alert_type}'. Message: {message[:100]}...")
-            # Si c'est une alerte immédiate, ne pas la mettre en file
-            if alert_type in telegram_config.get("immediate_alert_types", []):
-                # Envoyer immédiatement
-                pass # L'envoi réel irait ici
-            else:
-                # Mettre en file pour un résumé périodique (si implémenté)
-                pass # La mise en file irait ici
+        # Récupérer token et chat_ids
+        bot_token = telegram_config.get("bot_token")
+        chat_ids = telegram_config.get("authorized_chat_ids", [])
+        parse_mode = telegram_config.get("parse_mode", "Markdown")
 
+        if not bot_token or not chat_ids:
+            self.logger.warning(f"Token ou chat_ids manquants pour envoyer l'alerte '{alert_type}'.")
+            return
+
+        # Envoyer via API Telegram
+        try:
+            import requests
+
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+            for chat_id in chat_ids:
+                try:
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": message,
+                        "parse_mode": parse_mode
+                    }
+                    response = requests.post(url, json=payload, timeout=10)
+
+                    if response.status_code == 200:
+                        self.logger.info(f"Alerte Telegram envoyée ({alert_type}) à {chat_id}")
+                    else:
+                        self.logger.warning(f"Erreur Telegram API: {response.status_code} - {response.text}")
+
+                except Exception as e:
+                    self.logger.error(f"Erreur envoi Telegram à {chat_id}: {e}")
+
+        except ImportError:
+            self.logger.error("Module 'requests' non disponible pour envoyer les alertes Telegram")
         except Exception as e:
-            self.logger.error(f"Échec de l'envoi de l'alerte Telegram pour le type '{alert_type}': {e}", exc_info=True)
+            self.logger.error(f"Échec envoi alerte Telegram '{alert_type}': {e}", exc_info=True)
 
 
     def _rotate_backups(self, backup_dir: Path, max_backups: int) -> None:
