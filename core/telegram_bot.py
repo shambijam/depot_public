@@ -186,11 +186,12 @@ class TelegramBotController:
                 await update.message.reply_text("❌ Impossible de récupérer les infos du compte")
                 return
 
-            balance = account_info.get("balance", 0)
-            equity = account_info.get("equity", 0)
-            profit = account_info.get("profit", 0)
-            margin = account_info.get("margin", 0)
-            margin_free = account_info.get("margin_free", 0)
+            # AccountInfo est un named tuple, pas un dict
+            balance = account_info.balance
+            equity = account_info.equity
+            profit = account_info.profit
+            margin = account_info.margin
+            margin_free = account_info.margin_free
 
             profit_emoji = "🟢" if profit >= 0 else "🔴"
 
@@ -226,10 +227,12 @@ class TelegramBotController:
             message = f"📈 *Positions Ouvertes* ({len(positions)})\n\n"
 
             for pos in positions[:10]:  # Limiter à 10 positions
-                symbol = pos.get("symbol", "?")
-                pos_type = "🟢 BUY" if pos.get("type") == 0 else "🔴 SELL"
-                volume = pos.get("volume", 0)
-                profit = pos.get("profit", 0)
+                # TradePosition est un named tuple, pas un dict
+                symbol = pos.symbol if hasattr(pos, 'symbol') else pos.get("symbol", "?") if isinstance(pos, dict) else "?"
+                pos_type_val = pos.type if hasattr(pos, 'type') else pos.get("type", -1) if isinstance(pos, dict) else -1
+                pos_type = "🟢 BUY" if pos_type_val == 0 else "🔴 SELL"
+                volume = pos.volume if hasattr(pos, 'volume') else pos.get("volume", 0) if isinstance(pos, dict) else 0
+                profit = pos.profit if hasattr(pos, 'profit') else pos.get("profit", 0) if isinstance(pos, dict) else 0
                 profit_emoji = "+" if profit >= 0 else ""
 
                 message += f"`{symbol}` {pos_type} | Vol: {volume} | P&L: {profit_emoji}${profit:.2f}\n"
@@ -345,7 +348,8 @@ class TelegramBotController:
 
             for pos in positions:
                 try:
-                    ticket = pos.get("ticket")
+                    # TradePosition est un named tuple
+                    ticket = pos.ticket if hasattr(pos, 'ticket') else pos.get("ticket") if isinstance(pos, dict) else None
                     if ticket:
                         result = self.mt5_connector.close_position(ticket)
                         if result:
@@ -353,7 +357,8 @@ class TelegramBotController:
                         else:
                             errors.append(f"Ticket {ticket}")
                 except Exception as e:
-                    errors.append(f"Ticket {pos.get('ticket', '?')}: {e}")
+                    pos_ticket = pos.ticket if hasattr(pos, 'ticket') else pos.get('ticket', '?') if isinstance(pos, dict) else '?'
+                    errors.append(f"Ticket {pos_ticket}: {e}")
 
             message = f"✅ {closed_count} position(s) fermée(s)"
             if errors:
