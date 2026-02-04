@@ -44,6 +44,7 @@ try:
     from core.audit_logger import AuditLogger
     from core.strategy_manager import StrategyManager
     from core.decision_pipeline import DecisionPipeline
+    from core.telegram_bot import create_telegram_controller
 
     from run_bot import (
         verify_environment_and_config,
@@ -320,6 +321,20 @@ def main(args: argparse.Namespace) -> None:
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
         )
         trade_executor.reconcile_state_with_broker()
+
+        # --- Initialisation Telegram Bot Controller ---
+        telegram_controller = None
+        try:
+            telegram_controller = create_telegram_controller(
+                config_manager=config_manager,
+                mt5_connector=mt5_connector,
+                logger=logger
+            )
+            if telegram_controller:
+                telegram_controller.start()
+                logger.info("Telegram Bot Controller demarre avec succes")
+        except Exception as e_telegram:
+            logger.warning(f"Telegram Bot Controller non demarre: {e_telegram}")
 
     except (SystemExit, RuntimeError, Exception) as e:
         logger.critical(

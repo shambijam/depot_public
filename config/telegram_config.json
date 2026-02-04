@@ -1,15 +1,19 @@
 {
     "telegram": {
-        "enabled": false,
+        "enabled": true,
         "debug": false,
+        "bot_token": "8479343720:AAFF1Y9cCH9FRnORiPUEtD6ylgbfovhETYM",
+        "authorized_chat_ids": [
+            "1123477394"
+        ],
         "channels": {
-            "telegram": false,
+            "telegram": true,
             "telegram_market_phase": false,
-            "telegram_trade_confirmed": false,
-            "telegram_trade_closed": false,
-            "telegram_critical": false,
-            "telegram_manual_override": false,
-            "telegram_summary": false
+            "telegram_trade_confirmed": true,
+            "telegram_trade_closed": true,
+            "telegram_critical": true,
+            "telegram_manual_override": true,
+            "telegram_summary": true
         },
         "immediate_alert_types": [
             "telegram_critical",
@@ -20,17 +24,17 @@
         "summary_interval_minutes": 8,
         "summary_max_queued_messages": 10,
         "templates": {
-            "new_suggestion": "💡 Nouvelle Suggestion: {type} - {summary} | Priorité: {priority:.2f}",
-            "pending_suggestion_reminder": "⏰ Rappel: Suggestion en attente - {summary} ({age} jours). Priorité: {priority:.2f}",
-            "compliance_alert": "🚨 Alerte Conformité: {issue} | Item: {item} | Priorité: {priority:.2f} | Action: {action}",
-            "trade_confirmed": "🚀 Trade Confirmé (IA): Symbole: {symbol} | Action: {action} | Volume: {volume} lots | Stratégie: {strategy}",
-            "trade_closed": "📊 Trade Clôturé (IA): Symbole: {symbol} | P&L: ${pnl:.2f} ({status}) | Stratégie: {strategy}",
-            "manual_override": "⚠️ **INTERVENTION MANUELLE REQUISE** ⚠️\nRaison: {reason}\nTrade: {action} {asset} {volume} lots\nStratégie: {strategy_type} | Confiance IA: {confidence_score:.2f}",
-            "summary_header": "--- **Résumé Périodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})",
+            "new_suggestion": "Nouvelle Suggestion: {type} - {summary} | Priorite: {priority:.2f}",
+            "pending_suggestion_reminder": "Rappel: Suggestion en attente - {summary} ({age} jours). Priorite: {priority:.2f}",
+            "compliance_alert": "Alerte Conformite: {issue} | Item: {item} | Priorite: {priority:.2f} | Action: {action}",
+            "trade_confirmed": "Trade Confirme (IA): Symbole: {symbol} | Action: {action} | Volume: {volume} lots | Strategie: {strategy}",
+            "trade_closed": "Trade Cloture (IA): Symbole: {symbol} | P&L: ${pnl:.2f} ({status}) | Strategie: {strategy}",
+            "manual_override": "**INTERVENTION MANUELLE REQUISE**\nRaison: {reason}\nTrade: {action} {asset} {volume} lots\nStrategie: {strategy_type} | Confiance IA: {confidence_score:.2f}",
+            "summary_header": "--- **Resume Periodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})",
             "trade_execution": {
-                "executed": "✅ Ordre exécuté: {action_str} {volume} {symbol} @ {price}",
-                "failed": "❌ Échec ordre: {action_str} {symbol}. Raison: {message}. Code: {retcode}",
-                "pending_manual_approval": "✋ Ordre en attente: {action_str} {volume} {symbol}. Volume élevé. Approuver manuellement."
+                "executed": "Ordre execute: {action_str} {volume} {symbol} @ {price}",
+                "failed": "Echec ordre: {action_str} {symbol}. Raison: {message}. Code: {retcode}",
+                "pending_manual_approval": "Ordre en attente: {action_str} {volume} {symbol}. Volume eleve. Approuver manuellement."
             }
         }
     }
