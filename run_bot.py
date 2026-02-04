@@ -5404,6 +5404,23 @@ def main(args: argparse.Namespace) -> None:
                     logger.info("📊 Dashboard lancé sur http://localhost:5000")
                 except Exception as dash_err:
                     logger.warning(f"⚠️ Dashboard non lancé (non bloquant): {dash_err}")
+
+                # ✅ LANCEMENT DU TELEGRAM BOT CONTROLLER (04 FEV 2026)
+                # Permet de contrôler le bot à distance via Telegram
+                try:
+                    from core.telegram_bot import create_telegram_controller
+                    telegram_controller = create_telegram_controller(
+                        config_manager=config_manager,
+                        mt5_connector=mt5_connector,
+                        logger=logger
+                    )
+                    if telegram_controller:
+                        telegram_controller.start()
+                        logger.info("📱 Telegram Bot Controller démarré - Commandes disponibles: /status, /positions, /balance, /stop, /help")
+                    else:
+                        logger.warning("⚠️ Telegram Controller non configuré (token ou chat_id manquant)")
+                except Exception as tg_err:
+                    logger.warning(f"⚠️ Telegram Controller non démarré (non bloquant): {tg_err}")
             else:
                 logger.critical("MT5 non connecté pour la réconciliation - ARRÊT DU BOT")
                 sys.exit(1)
