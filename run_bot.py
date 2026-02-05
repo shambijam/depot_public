@@ -3737,6 +3737,7 @@ def scalping_worker(
                 inst_result = None
                 inst_score = 0.0
                 inst_veto_fatigue = False
+                inst_veto_reversal = False  # 05 FEV 2026: VETO DIRECT si reversal détecté
 
                 try:
                     if institutional_detector is not None and rates_df_fresh is not None:
@@ -4411,10 +4412,15 @@ def scalping_worker(
                                         f"BONUS_INSTITUTIONAL: +10 (Score={inst_score:.0f}, Trend={inst_trend})"
                                     )
                                 elif inst_result.get('reversal_detected', False):
-                                    # Reversal détecté mais dans direction opposée → prudence
-                                    pma_malus += 15.0
+                                    # 🚫 05 FEV 2026: VETO DIRECT si reversal détecté en direction opposée
+                                    inst_veto_reversal = True
                                     pma_adjustments.append(
-                                        f"MALUS_INST_REVERSAL: -15 (Reversal {inst_trend} vs Signal {signal_action})"
+                                        f"🚫 VETO_REVERSAL: Reversal {inst_trend} vs Signal {signal_action} (Score={inst_score:.0f})"
+                                    )
+                                    logger.warning(
+                                        f"🚫 [VETO_REVERSAL][{asset}] Trade BLOQUÉ | "
+                                        f"Reversal {inst_trend} détecté vs Signal {signal_action} | "
+                                        f"Score institutionnel: {inst_score:.0f}"
                                     )
 
                             # ══════════════════════════════════════════════════════
@@ -4451,11 +4457,28 @@ def scalping_worker(
                                 )
 
                             # ══════════════════════════════════════════════════════
+                            # 🚫 VETO REVERSAL DIRECT (05 FEV 2026)
+                            # Si reversal institutionnel détecté → Trade bloqué
+                            # ══════════════════════════════════════════════════════
+                            if signal_action in ["BUY", "SELL"] and inst_veto_reversal:
+                                old_action = decision_mini["action"]
+                                decision_mini["action"] = "HOLD"
+                                decision_mini["confidence"] = 0.0
+                                decision_mini["rationale"] = (
+                                    f"🚫 VETO_REVERSAL: Renversement institutionnel détecté | "
+                                    f"Original: {old_action}"
+                                )
+
+                            # ══════════════════════════════════════════════════════
                             # 📊 LOG DU RAPPORT PMA
                             # ══════════════════════════════════════════════════════
-                            if pma_adjustment_total != 0 or pma_veto_dur:
+                            if pma_adjustment_total != 0 or pma_veto_dur or inst_veto_reversal:
                                 adj_emoji = "📈" if pma_adjustment_total > 0 else ("📉" if pma_adjustment_total < 0 else "⚖️")
-                                veto_str = " 🚫 VETO_DUR" if pma_veto_dur else ""
+                                veto_str = ""
+                                if pma_veto_dur:
+                                    veto_str = " 🚫 VETO_DUR"
+                                if inst_veto_reversal:
+                                    veto_str = " 🚫 VETO_REVERSAL"
 
                                 logger.info(
                                     f"{adj_emoji} [PMA_ADJUSTMENT][{asset}] "
@@ -4509,7 +4532,8 @@ def scalping_worker(
                                     "conviction": inst_result.get('conviction_level', 'N/A') if inst_result else 'N/A',
                                     "trend": inst_result.get('new_trend', 'N/A') if inst_result else 'N/A',
                                     "reversal_detected": inst_result.get('reversal_detected', False) if inst_result else False,
-                                    "veto_fatigue": inst_veto_fatigue
+                                    "veto_fatigue": inst_veto_fatigue,
+                                    "veto_reversal": inst_veto_reversal  # 05 FEV 2026: VETO DIRECT
                                 }
                             }
 
