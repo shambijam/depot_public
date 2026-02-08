@@ -254,12 +254,12 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 18.0,
+          "pips": 10.0,
           "buffer_pips": 2,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "swing_lookback": 0,
-          "comment": "03 FEV 2026: 18 pips SL pour USDCHF (légèrement moins que USDJPY car moins volatile)"
+          "comment": "03 FEV 2026: 10 pips SL pour USDCHF (légèrement moins que USDJPY car moins volatile)"
         },
         "tp": {
           "pips": 27.0,

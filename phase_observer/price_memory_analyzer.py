@@ -966,11 +966,11 @@ class PriceMemoryAnalyzer:
         """
         self._init_asset_history(asset)
 
-        # 🔧 04 FEV 2026: ANALYSE TENDANCE DERNIÈRE BOUGIE
-        # Regarde 1 seule bougie (la dernière) pour déterminer la tendance
-        # Plus réactif pour le scalping
+        # 🔧 08 FEV 2026: ANALYSE TENDANCE SUR 3 BOUGIES
+        # Regarde 3 bougies pour lisser le bruit M1
+        # 1 seule bougie causait des faux signaux (un petit rebond = BULLISH)
 
-        LOOKBACK_CANDLES = 1  # Nombre de bougies à analyser
+        LOOKBACK_CANDLES = 3  # Nombre de bougies à analyser
 
         if candles is None or len(candles) < 1:
             direction = 'NEUTRAL'
@@ -1141,23 +1141,61 @@ class PriceMemoryAnalyzer:
         # 🔧 16 JAN 2026: BONUS SIMPLE
         # 3/3 = +30 | 2/3 = +15 | 1/3 = +5
 
-         # --- NOUVELLE LOGIQUE : DICTATURE DU M1 ---
+        # --- 08 FEV 2026: PONDÉRATION M15>M5>M1 (remplace dictature M1) ---
+        # M15 = 50%, M5 = 30%, M1 = 20%
+        # M1 n'a plus de droit de veto absolu
         direction = 'NEUTRAL'
         alignment_count = 0
 
-        # M1 est le juge de paix
-        m1_dir = m1_result.direction if m1_result else "NO_DATA"
+        # Calcul du score pondéré
+        weight_m15 = 0.50
+        weight_m5 = 0.30
+        weight_m1 = 0.20
 
-        if bullish_count >= 2 and m1_dir == "BULLISH":
+        weighted_score = 0.0  # positif = BULLISH, négatif = BEARISH
+        total_weight = 0.0
+
+        if m15_result and m15_result.direction != "NO_DATA":
+            if m15_result.direction == "BULLISH":
+                weighted_score += weight_m15
+            elif m15_result.direction == "BEARISH":
+                weighted_score -= weight_m15
+            total_weight += weight_m15
+
+        if m5_result and m5_result.direction != "NO_DATA":
+            if m5_result.direction == "BULLISH":
+                weighted_score += weight_m5
+            elif m5_result.direction == "BEARISH":
+                weighted_score -= weight_m5
+            total_weight += weight_m5
+
+        if m1_result and m1_result.direction != "NO_DATA":
+            if m1_result.direction == "BULLISH":
+                weighted_score += weight_m1
+            elif m1_result.direction == "BEARISH":
+                weighted_score -= weight_m1
+            total_weight += weight_m1
+
+        # Seuil de décision: score pondéré >= 0.30 pour direction claire
+        # (M15+M5 BEARISH = -0.80 → BEARISH même si M1 BULLISH: -0.80+0.20 = -0.60)
+        WEIGHTED_THRESHOLD = 0.30
+
+        if weighted_score >= WEIGHTED_THRESHOLD:
             direction = "BULLISH"
             alignment_count = bullish_count
-        elif bearish_count >= 2 and m1_dir == "BEARISH":
+        elif weighted_score <= -WEIGHTED_THRESHOLD:
             direction = "BEARISH"
             alignment_count = bearish_count
         else:
-            # Si M1 n'est pas d'accord -> NEUTRAL
             direction = "NEUTRAL"
-            alignment_count = 0 
+            alignment_count = 0
+
+        if self.logger:
+            self.logger.info(
+                f"[MTF_WEIGHTED][{asset}] Score pondéré: {weighted_score:+.2f} "
+                f"(seuil={WEIGHTED_THRESHOLD}) → {direction} | "
+                f"M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+            )
 
         # 👇👇👇 C'EST CETTE LIGNE QUI MANQUAIT 👇👇👇
         alignment = f"{alignment_count}/3"

@@ -1749,16 +1749,101 @@ class InstitutionalReversalDetector:
         return max(0.0, min(1.0, r_squared))
 
     def _validate_smart_money(self, market_data: Dict) -> Dict:
-        """Validation par les smart money"""
+        """
+        08 FEV 2026: Vraie validation Smart Money basée sur 3 critères.
+        validated=True seulement si au moins 2/3 critères satisfaits.
+        """
+        candles_m5 = market_data.get('candles_m5', pd.DataFrame())
+        candles_m1 = market_data.get('candles_m1', pd.DataFrame())
+        volume_values = market_data.get('volume_values', [])
+        cvd_values = market_data.get('cvd_values', [])
+
+        criteria_met = 0
+        validation_methods = []
+
+        # Critère 1: Volume Profile Confirmation
+        # Volume sur les dernières bougies doit être au-dessus de la moyenne
+        try:
+            if len(volume_values) >= 10:
+                recent_vol = volume_values[-5:]
+                avg_vol = np.mean(volume_values[-20:]) if len(volume_values) >= 20 else np.mean(volume_values)
+                recent_avg = np.mean(recent_vol)
+                if avg_vol > 0 and recent_avg >= avg_vol * 1.2:
+                    criteria_met += 1
+                    validation_methods.append("VOLUME_PROFILE_CONFIRMED")
+                else:
+                    validation_methods.append("VOLUME_PROFILE_WEAK")
+            else:
+                validation_methods.append("VOLUME_PROFILE_NO_DATA")
+        except Exception:
+            validation_methods.append("VOLUME_PROFILE_ERROR")
+
+        # Critère 2: Price Action - Swing Points Validation
+        # Vérifier si les dernières bougies forment un swing (HH/HL ou LH/LL)
+        try:
+            candles_for_pa = candles_m1 if candles_m1 is not None and len(candles_m1) >= 10 else candles_m5
+            if candles_for_pa is not None and len(candles_for_pa) >= 10:
+                highs = candles_for_pa['high'].values[-10:]
+                lows = candles_for_pa['low'].values[-10:]
+
+                # Chercher un swing point dans les 5 dernières bougies
+                # Swing High: bougie[i] high > bougie[i-1] high ET > bougie[i+1] high
+                # Swing Low: bougie[i] low < bougie[i-1] low ET < bougie[i+1] low
+                swing_detected = False
+                for i in range(1, len(highs) - 1):
+                    if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+                        swing_detected = True
+                        break
+                    if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+                        swing_detected = True
+                        break
+
+                if swing_detected:
+                    criteria_met += 1
+                    validation_methods.append("PRICE_ACTION_SWING_CONFIRMED")
+                else:
+                    validation_methods.append("PRICE_ACTION_NO_SWING")
+            else:
+                validation_methods.append("PRICE_ACTION_NO_DATA")
+        except Exception:
+            validation_methods.append("PRICE_ACTION_ERROR")
+
+        # Critère 3: CVD Flow Divergence
+        # CVD doit montrer un changement de direction cohérent
+        try:
+            if len(cvd_values) >= 10:
+                cvd_recent = cvd_values[-5:]
+                cvd_older = cvd_values[-10:-5]
+
+                cvd_recent_slope = cvd_recent[-1] - cvd_recent[0] if len(cvd_recent) >= 2 else 0
+                cvd_older_slope = cvd_older[-1] - cvd_older[0] if len(cvd_older) >= 2 else 0
+
+                # Divergence = changement de direction du CVD
+                if (cvd_recent_slope > 0 and cvd_older_slope < 0) or \
+                   (cvd_recent_slope < 0 and cvd_older_slope > 0):
+                    criteria_met += 1
+                    validation_methods.append("CVD_DIVERGENCE_CONFIRMED")
+                elif abs(cvd_recent_slope) > abs(cvd_older_slope) * 1.5:
+                    # Accélération du CVD = signal fort
+                    criteria_met += 1
+                    validation_methods.append("CVD_ACCELERATION_CONFIRMED")
+                else:
+                    validation_methods.append("CVD_NO_DIVERGENCE")
+            else:
+                validation_methods.append("CVD_NO_DATA")
+        except Exception:
+            validation_methods.append("CVD_ERROR")
+
+        # Validation: au moins 2/3 critères doivent être satisfaits
+        validated = criteria_met >= 2
+        confidence = criteria_met / 3.0
+
         return {
-            "validated": True,
-            "confidence": 0.85,
-            "institutional_bias": "ALIGNED",
-            "validation_methods": [
-                "VOLUME_ANALYSIS",
-                "ORDER_FLOW",
-                "CVD_ANALYSIS"
-            ]
+            "validated": validated,
+            "confidence": round(confidence, 2),
+            "institutional_bias": "ALIGNED" if validated else "UNCONFIRMED",
+            "criteria_met": criteria_met,
+            "validation_methods": validation_methods
         }
 
     def _make_institutional_decision(self, score: float,
