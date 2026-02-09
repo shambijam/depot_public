@@ -966,11 +966,7 @@ class PriceMemoryAnalyzer:
         """
         self._init_asset_history(asset)
 
-        # 🔧 08 FEV 2026: ANALYSE TENDANCE SUR 3 BOUGIES
-        # Regarde 3 bougies pour lisser le bruit M1
-        # 1 seule bougie causait des faux signaux (un petit rebond = BULLISH)
-
-        LOOKBACK_CANDLES = 3  # Nombre de bougies à analyser
+        LOOKBACK_CANDLES = 1  # 1 bougie = réactivité scalping
 
         if candles is None or len(candles) < 1:
             direction = 'NEUTRAL'
@@ -979,57 +975,28 @@ class PriceMemoryAnalyzer:
             if self.logger:
                 self.logger.warning(f"[MTF][{asset}][{timeframe}] PAS DE DONNÉES!")
         else:
-            # Prendre les N dernières bougies (ou moins si pas assez)
-            n_candles = min(LOOKBACK_CANDLES, len(candles))
-            recent_candles = candles.iloc[-n_candles:]
-
-            # Calculer le mouvement net du prix sur la période
-            point = self._get_point_size(asset)
-            first_open = float(recent_candles.iloc[0]['open'])
-            last_close = float(recent_candles.iloc[-1]['close'])
-            net_pips = (last_close - first_open) / point
-
-            # Compter les bougies vertes vs rouges
-            green_count = 0
-            red_count = 0
-            for _, c in recent_candles.iterrows():
-                c_open = float(c['open'])
-                c_close = float(c['close'])
-                if c_close > c_open:
-                    green_count += 1
-                elif c_close < c_open:
-                    red_count += 1
-
-            # Déterminer direction basée sur majorité ET mouvement net
-            # BEARISH: majorité rouge OU mouvement net négatif significatif
-            # BULLISH: majorité verte OU mouvement net positif significatif
-            if red_count > green_count or net_pips < -2:
-                direction = 'BEARISH'
-            elif green_count > red_count or net_pips > 2:
-                direction = 'BULLISH'
-            else:
-                # Égalité - regarder le mouvement net
-                if net_pips < 0:
-                    direction = 'BEARISH'
-                elif net_pips > 0:
-                    direction = 'BULLISH'
-                else:
-                    direction = 'NEUTRAL'
-
-            # Infos de la dernière bougie pour le log
+            # Dernière bougie uniquement (réactivité scalping)
             last_candle = candles.iloc[-1]
             candle_open = float(last_candle['open'])
             candle_close = float(last_candle['close'])
             candle_high = float(last_candle['high'])
             candle_low = float(last_candle['low'])
 
-            # 🔍 DEBUG: Log avec analyse multi-bougies
+            point = self._get_point_size(asset)
+            net_pips = (candle_close - candle_open) / point
+
+            if candle_close < candle_open:
+                direction = 'BEARISH'
+            elif candle_close > candle_open:
+                direction = 'BULLISH'
+            else:
+                direction = 'NEUTRAL'
+
             if self.logger:
                 color = "🔴" if direction == 'BEARISH' else ("🟢" if direction == 'BULLISH' else "⚪")
                 self.logger.info(
                     f"[MTF_CANDLE][{asset}][{timeframe}] {color} "
-                    f"[{n_candles} bougies] 🟢{green_count} vs 🔴{red_count} | "
-                    f"Net: {net_pips:+.1f} pips | → {direction}"
+                    f"{net_pips:+.1f} pips | → {direction}"
                 )
 
             # Trend clarity
