@@ -1030,11 +1030,9 @@ class ScalpingStrategy(BaseStrategy):
                     df_m15, 1, bullish_threshold, bearish_threshold
                 ).lower()
 
-            # Alignement MTF
-            mtf_aligned_with_buy = (m5_dir == "bullish" and m1_dir == "bullish")
-            mtf_aligned_with_sell = (m5_dir == "bearish" and m1_dir == "bearish")
-            mtf_3_3_bullish = mtf_aligned_with_buy and m15_dir == "bullish"
-            mtf_3_3_bearish = mtf_aligned_with_sell and m15_dir == "bearish"
+            # Alignement MTF - M15 est la REINE, les 3 doivent etre alignes
+            mtf_3_3_bullish = (m15_dir == "bullish" and m5_dir == "bullish" and m1_dir == "bullish")
+            mtf_3_3_bearish = (m15_dir == "bearish" and m5_dir == "bearish" and m1_dir == "bearish")
 
             # Appliquer bias + VETO MTF
             result["mtf_veto"] = False
@@ -1043,51 +1041,41 @@ class ScalpingStrategy(BaseStrategy):
             result["mtf_bonus"] = False
 
             if delta_direction == "bullish":
-                if mtf_aligned_with_buy:
+                if mtf_3_3_bullish:
+                    # M15+M5+M1 tous BULLISH → BUY autorise
                     result["bias"] = "BUY"
+                    result["mtf_3_3"] = True
                     result["mtf_bonus"] = True
-                    if mtf_3_3_bullish:
-                        result["total_score"] = min(100.0, result["total_score"] + 15)
-                        result["mtf_3_3"] = True
-                        self.logger.info(
-                            f"[MTF_QUEEN][{asset}] BUY + MTF 3/3 BULLISH (M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}) → +15 pts (score={result['total_score']}/100)"
-                        )
-                    else:
-                        result["total_score"] = min(100.0, result["total_score"] + 10)
-                        self.logger.info(
-                            f"[MTF_QUEEN][{asset}] BUY + MTF M5+M1 BULLISH (M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}) → +10 pts (score={result['total_score']}/100)"
-                        )
+                    result["total_score"] = min(100.0, result["total_score"] + 15)
+                    self.logger.info(
+                        f"[MTF_QUEEN][{asset}] BUY AUTORISE - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} 3/3 BULLISH → +15 pts (score={result['total_score']}/100)"
+                    )
                 else:
-                    # VETO: Delta veut BUY mais M5+M1 pas alignes BULLISH
+                    # M15 ou M5 ou M1 pas aligne → VETO
                     result["bias"] = "NEUTRAL"
                     result["mtf_veto"] = True
                     result["mtf_conflict"] = True
                     self.logger.warning(
-                        f"[MTF_QUEEN][{asset}] VETO BUY - M5:{m5_dir} M1:{m1_dir} pas alignes BULLISH (delta={delta_direction})"
+                        f"[MTF_QUEEN][{asset}] VETO BUY - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} pas 3/3 BULLISH (delta={delta_direction})"
                     )
 
             elif delta_direction == "bearish":
-                if mtf_aligned_with_sell:
+                if mtf_3_3_bearish:
+                    # M15+M5+M1 tous BEARISH → SELL autorise
                     result["bias"] = "SELL"
+                    result["mtf_3_3"] = True
                     result["mtf_bonus"] = True
-                    if mtf_3_3_bearish:
-                        result["total_score"] = min(100.0, result["total_score"] + 15)
-                        result["mtf_3_3"] = True
-                        self.logger.info(
-                            f"[MTF_QUEEN][{asset}] SELL + MTF 3/3 BEARISH (M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}) → +15 pts (score={result['total_score']}/100)"
-                        )
-                    else:
-                        result["total_score"] = min(100.0, result["total_score"] + 10)
-                        self.logger.info(
-                            f"[MTF_QUEEN][{asset}] SELL + MTF M5+M1 BEARISH (M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}) → +10 pts (score={result['total_score']}/100)"
-                        )
+                    result["total_score"] = min(100.0, result["total_score"] + 15)
+                    self.logger.info(
+                        f"[MTF_QUEEN][{asset}] SELL AUTORISE - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} 3/3 BEARISH → +15 pts (score={result['total_score']}/100)"
+                    )
                 else:
-                    # VETO: Delta veut SELL mais M5+M1 pas alignes BEARISH
+                    # M15 ou M5 ou M1 pas aligne → VETO
                     result["bias"] = "NEUTRAL"
                     result["mtf_veto"] = True
                     result["mtf_conflict"] = True
                     self.logger.warning(
-                        f"[MTF_QUEEN][{asset}] VETO SELL - M5:{m5_dir} M1:{m1_dir} pas alignes BEARISH (delta={delta_direction})"
+                        f"[MTF_QUEEN][{asset}] VETO SELL - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} pas 3/3 BEARISH (delta={delta_direction})"
                     )
 
             else:
