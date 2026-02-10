@@ -4313,42 +4313,54 @@ def scalping_worker(
                             filtre1_confidence = 0.0
 
                             # ═══════════════════════════════════════════════════════════════
-                            # 🎯 10 FEV 2026: FILTRE 1 DELTA SIMPLIFIÉ
-                            # Le VETO MTF est désormais dans scalping.py (MTF Queen Rule).
-                            # Ici on garde uniquement le check delta + CVD pour Branche 2.
+                            # 🎯 10 FEV 2026: FILTRE 1 DELTA - RESPECTE MTF QUEEN
+                            # Le bias de scalping.py (filtre par MTF Queen M15+M5+M1)
+                            # est la REFERENCE. Le Triple Filter ne peut PAS le contredire.
                             # ═══════════════════════════════════════════════════════════════
 
-                            # Directions MTF pour logging uniquement
+                            # Directions MTF pour logging
                             m15_dir = mtf_verdict.m15_direction if mtf_verdict else "NO_DATA"
                             m5_dir = mtf_verdict.m5_direction if mtf_verdict else "NO_DATA"
                             m1_dir = mtf_verdict.m1_direction if mtf_verdict else "NO_DATA"
 
-                            # BUY : Delta positif au-dessus du seuil
-                            if delta_weighted > 0 and abs(delta_weighted) >= delta_threshold:
+                            # Bias MTF Queen (vient de scalping.py _analyze_orderflow_v6)
+                            of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
+
+                            # Si MTF Queen a dit NEUTRAL → pas de trade, le Triple Filter respecte
+                            if of_bias == "NEUTRAL":
+                                filtre1_direction = "HOLD"
+                                filtre1_confidence = 0.0
+                                logger.info(
+                                    f"[FILTRE1_DELTA][{asset}] HOLD - MTF Queen VETO (bias=NEUTRAL) | "
+                                    f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                                )
+
+                            # BUY : Bias autorise par MTF Queen ET delta positif au-dessus du seuil
+                            elif of_bias == "BUY" and delta_weighted > 0 and abs(delta_weighted) >= delta_threshold:
                                 filtre1_direction = "BUY"
                                 filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
                                 if cvd_aligned:
                                     filtre1_confidence = min(1.0, filtre1_confidence + 0.10)
                                 logger.info(
-                                    f"[FILTRE1_DELTA][{asset}] BUY | Delta={delta_weighted:.1f} | "
+                                    f"[FILTRE1_DELTA][{asset}] BUY | Delta={delta_weighted:.1f} | bias={of_bias} | "
                                     f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
                                 )
 
-                            # SELL : Delta négatif au-dessus du seuil
-                            elif delta_weighted < 0 and abs(delta_weighted) >= delta_threshold:
+                            # SELL : Bias autorise par MTF Queen ET delta negatif au-dessus du seuil
+                            elif of_bias == "SELL" and delta_weighted < 0 and abs(delta_weighted) >= delta_threshold:
                                 filtre1_direction = "SELL"
                                 filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
                                 if cvd_aligned:
                                     filtre1_confidence = min(1.0, filtre1_confidence + 0.10)
                                 logger.info(
-                                    f"[FILTRE1_DELTA][{asset}] SELL | Delta={delta_weighted:.1f} | "
+                                    f"[FILTRE1_DELTA][{asset}] SELL | Delta={delta_weighted:.1f} | bias={of_bias} | "
                                     f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
                                 )
 
-                            # HOLD : Delta trop faible
+                            # HOLD : Delta trop faible ou direction incoherente avec bias
                             else:
                                 logger.debug(
-                                    f"[FILTRE1_DELTA][{asset}] HOLD - Delta={delta_weighted:.1f} < seuil={delta_threshold:.1f} | "
+                                    f"[FILTRE1_DELTA][{asset}] HOLD - Delta={delta_weighted:.1f} seuil={delta_threshold:.1f} bias={of_bias} | "
                                     f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
                                 )
 
