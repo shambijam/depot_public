@@ -3143,18 +3143,9 @@ def apply_pma_adjustments(
             f"MALUS_MICRO_RES: -30 (Résistance {micro_resistance_info['strength']} à {micro_resistance_info['distance_pips']:.2f} pips)"
         )
 
-    # MALUS 2: Contre-Tendance MTF (-35 pts)
-    if mtf_verdict is not None and mtf_verdict.alignment_count >= 2:
-        if mtf_direction == "BEARISH" and signal_action == "BUY":
-            pma_malus += 35.0
-            pma_adjustments.append(
-                f"MALUS_CONTRE_MTF: -35 (MTF {mtf_verdict.alignment} BEARISH vs Signal BUY)"
-            )
-        elif mtf_direction == "BULLISH" and signal_action == "SELL":
-            pma_malus += 35.0
-            pma_adjustments.append(
-                f"MALUS_CONTRE_MTF: -35 (MTF {mtf_verdict.alignment} BULLISH vs Signal SELL)"
-            )
+    # MALUS 2: Contre-Tendance MTF → SUPPRIMÉ 10 FEV 2026
+    # La stratégie (scalping.py) applique désormais le VETO MTF AVANT le bias.
+    # Ce malus post-hoc est redondant et inefficace.
 
     # MALUS 3: Zone Range/Accumulation (-20 pts)
     current_regime_lower = str(current_regime).lower() if current_regime else "unknown"
@@ -3739,15 +3730,18 @@ def scalping_worker(
                         asset_signals_for_of = {
                             "footprint_summary": {},
                             "orderflow_summary": {},
-                            "ticks_df": ticks_df  # 🆕 Pour analyseurs institutionnels (Phase 1+2)
+                            "ticks_df": ticks_df,  # 🆕 Pour analyseurs institutionnels (Phase 1+2)
+                            "df_m15": rates_df_m15  # 🆕 10 FEV 2026: M15 pour MTF Queen Rule
                         }
 
                         # Appel OrderFlow V6
+                        # 🔧 10 FEV 2026: Passer rates_df_m5 (au lieu de None) pour que la stratégie
+                        # voie M5 et puisse appliquer le VETO MTF AVANT de décider BUY/SELL
                         of_v6_result = scalping_strategy._analyze_orderflow_v6(
                             asset=asset,
                             df_m1=rates_df_fresh,
                             df_m3=None,
-                            df_m5=None,
+                            df_m5=rates_df_m5,
                             asset_signals=asset_signals_for_of
                         )
 
@@ -4319,81 +4313,43 @@ def scalping_worker(
                             filtre1_confidence = 0.0
 
                             # ═══════════════════════════════════════════════════════════════
-                            # 🎯 03 FEV 2026: DELTA + CONFIRMATION MTF OBLIGATOIRE
-                            # BUY  = Delta+ ET MTF M5+M1 BULLISH (ou M15+M5+M1 BULLISH)
-                            # SELL = Delta- ET MTF M5+M1 BEARISH (ou M15+M5+M1 BEARISH)
+                            # 🎯 10 FEV 2026: FILTRE 1 DELTA SIMPLIFIÉ
+                            # Le VETO MTF est désormais dans scalping.py (MTF Queen Rule).
+                            # Ici on garde uniquement le check delta + CVD pour Branche 2.
                             # ═══════════════════════════════════════════════════════════════
 
-                            # Extraire directions MTF
+                            # Directions MTF pour logging uniquement
                             m15_dir = mtf_verdict.m15_direction if mtf_verdict else "NO_DATA"
                             m5_dir = mtf_verdict.m5_direction if mtf_verdict else "NO_DATA"
                             m1_dir = mtf_verdict.m1_direction if mtf_verdict else "NO_DATA"
 
-                            # Check alignements MTF
-                            m5_m1_bullish = (m5_dir == "BULLISH" and m1_dir == "BULLISH")
-                            m5_m1_bearish = (m5_dir == "BEARISH" and m1_dir == "BEARISH")
-                            m15_aligned_bullish = (m15_dir == "BULLISH")
-                            m15_aligned_bearish = (m15_dir == "BEARISH")
-
-                            # BUY : Delta+ ET MTF confirme BULLISH (M5+M1)
+                            # BUY : Delta positif au-dessus du seuil
                             if delta_weighted > 0 and abs(delta_weighted) >= delta_threshold:
-                                if m5_m1_bullish:
-                                    filtre1_direction = "BUY"
-                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
-                                    # Boost si 3/3 aligné
-                                    if m15_aligned_bullish:
-                                        filtre1_confidence = min(1.0, filtre1_confidence + 0.15)
-                                    logger.info(
-                                        f"[MTF_CONFIRM][{asset}] ✅ BUY confirmé | "
-                                        f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
-                                    )
-                                else:
-                                    # Delta+ mais MTF pas BULLISH → REFUS
-                                    logger.warning(
-                                        f"[MTF_CONFIRM][{asset}] ❌ BUY REFUSÉ - MTF non BULLISH | "
-                                        f"Delta={delta_weighted:.1f} mais M5:{m5_dir} M1:{m1_dir} (requis: BULLISH)"
-                                    )
-                                    filtre1_direction = "HOLD"
-                                    filtre1_confidence = 0.0
-
-                            # SELL : Delta- ET MTF confirme BEARISH (M5+M1)
-                            elif delta_weighted < 0 and abs(delta_weighted) >= delta_threshold:
-                                if m5_m1_bearish:
-                                    filtre1_direction = "SELL"
-                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
-                                    # Boost si 3/3 aligné
-                                    if m15_aligned_bearish:
-                                        filtre1_confidence = min(1.0, filtre1_confidence + 0.15)
-                                    logger.info(
-                                        f"[MTF_CONFIRM][{asset}] ✅ SELL confirmé | "
-                                        f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
-                                    )
-                                else:
-                                    # Delta- mais MTF pas BEARISH → REFUS
-                                    logger.warning(
-                                        f"[MTF_CONFIRM][{asset}] ❌ SELL REFUSÉ - MTF non BEARISH | "
-                                        f"Delta={delta_weighted:.1f} mais M5:{m5_dir} M1:{m1_dir} (requis: BEARISH)"
-                                    )
-                                    filtre1_direction = "HOLD"
-                                    filtre1_confidence = 0.0
-
-                            # SELL via MTF seul (si delta faible mais MTF fort BEARISH)
-                            elif mtf_verdict is not None and m5_m1_bearish:
-                                filtre1_direction = "SELL"
-                                if m15_aligned_bearish:
-                                    filtre1_confidence = 0.85  # 3/3 BEARISH
-                                else:
-                                    filtre1_confidence = 0.70  # 2/3 BEARISH
+                                filtre1_direction = "BUY"
+                                filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                                if cvd_aligned:
+                                    filtre1_confidence = min(1.0, filtre1_confidence + 0.10)
                                 logger.info(
-                                    f"[MTF_CONFIRM][{asset}] ✅ SELL via MTF (delta faible) | "
+                                    f"[FILTRE1_DELTA][{asset}] BUY | Delta={delta_weighted:.1f} | "
                                     f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
                                 )
 
-                            # HOLD : Ni BUY ni SELL validé
+                            # SELL : Delta négatif au-dessus du seuil
+                            elif delta_weighted < 0 and abs(delta_weighted) >= delta_threshold:
+                                filtre1_direction = "SELL"
+                                filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                                if cvd_aligned:
+                                    filtre1_confidence = min(1.0, filtre1_confidence + 0.10)
+                                logger.info(
+                                    f"[FILTRE1_DELTA][{asset}] SELL | Delta={delta_weighted:.1f} | "
+                                    f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                                )
+
+                            # HOLD : Delta trop faible
                             else:
                                 logger.debug(
-                                    f"[MTF_CONFIRM][{asset}] ⏸️ HOLD - Pas de signal valide | "
-                                    f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                                    f"[FILTRE1_DELTA][{asset}] HOLD - Delta={delta_weighted:.1f} < seuil={delta_threshold:.1f} | "
+                                    f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
                                 )
 
                             filtre1_status = "✅ PASS" if filtre1_direction in ["BUY", "SELL"] else "❌ FAIL"
@@ -4731,38 +4687,9 @@ def scalping_worker(
                             logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
                             decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
-                        # ═══════════════════════════════════════════════════════════════
-                        # 🛡️ 02 FEV 2026: VÉRIFICATION ALIGNEMENT M5+M1 OBLIGATOIRE
-                        # Pour BUY  : M5 ET M1 doivent être BULLISH
-                        # Pour SELL : M5 ET M1 doivent être BEARISH
-                        # ═══════════════════════════════════════════════════════════════
-                        if mtf_verdict is not None and decision_mini["action"] in ["BUY", "SELL"]:
-                            m5_bullish = mtf_verdict.m5_direction == "BULLISH"
-                            m1_bullish = mtf_verdict.m1_direction == "BULLISH"
-                            m5_bearish = mtf_verdict.m5_direction == "BEARISH"
-                            m1_bearish = mtf_verdict.m1_direction == "BEARISH"
-
-                            # Pour BUY : M5 ET M1 doivent être BULLISH
-                            if decision_mini["action"] == "BUY" and not (m5_bullish and m1_bullish):
-                                logger.warning(
-                                    f"🛡️ [MTF_M5M1_BLOCK][{asset}] ❌ BUY BLOQUÉ | "
-                                    f"M5+M1 non alignés BULLISH | "
-                                    f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction}"
-                                )
-                                decision_mini["action"] = "HOLD"
-                                decision_mini["confidence"] = 0.0
-                                decision_mini["rationale"] = f"M5({mtf_verdict.m5_direction})+M1({mtf_verdict.m1_direction}) non alignés BULLISH - BUY bloqué"
-
-                            # Pour SELL : M5 ET M1 doivent être BEARISH
-                            elif decision_mini["action"] == "SELL" and not (m5_bearish and m1_bearish):
-                                logger.warning(
-                                    f"🛡️ [MTF_M5M1_BLOCK][{asset}] ❌ SELL BLOQUÉ | "
-                                    f"M5+M1 non alignés BEARISH | "
-                                    f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction}"
-                                )
-                                decision_mini["action"] = "HOLD"
-                                decision_mini["confidence"] = 0.0
-                                decision_mini["rationale"] = f"M5({mtf_verdict.m5_direction})+M1({mtf_verdict.m1_direction}) non alignés BEARISH - SELL bloqué"
+                        # M5M1_BLOCK → SUPPRIMÉ 10 FEV 2026
+                        # Le VETO MTF est désormais dans scalping.py (MTF Queen Rule).
+                        # La stratégie ne produit plus de BUY/SELL non aligné avec M5+M1.
 
                         # ═══════════════════════════════════════════════════════════════
                         # 🛡️ 08 FEV 2026: PMA ADJUSTMENTS BRANCHE 3 (identique à Branche 2)
