@@ -252,7 +252,7 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 10.0,
+          "pips": 15.0,
           "buffer_pips": 2,
           "atr_period": 14,
           "atr_multiplier": 0.0,
