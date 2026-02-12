@@ -290,6 +290,8 @@
           "comment": "07 JAN 2026: VETO trades après 52s (USDJPY plus permissif car moins volatile)"
         },
         "allowed_hours_gmt": [
+          5,
+          6,
           7,
           8,
           9,
