@@ -3742,6 +3742,8 @@ def scalping_worker(
                         # Le verdict MTF (M30+M15+M5+M1) est calculé ICI pour imposer
                         # la direction à scalping.py via asset_signals["mtf_direction"]
                         # ═══════════════════════════════════════════════════════════════
+                        # current_price depuis la dernière bougie M1 (disponible ici)
+                        current_price_for_mtf = rates_df_fresh.iloc[-1]['close'] if rates_df_fresh is not None and len(rates_df_fresh) > 0 else 0.0
                         mtf_verdict = None
                         mtf_bonus = 0.0
                         mtf_direction = "NEUTRAL"
@@ -3753,7 +3755,7 @@ def scalping_worker(
                                     candles_m15=rates_df_m15,
                                     candles_m5=rates_df_m5,
                                     candles_m1=rates_df_fresh,
-                                    current_price=current_price
+                                    current_price=current_price_for_mtf
                                 )
                                 mtf_bonus = mtf_verdict.bonus
                                 mtf_direction = mtf_verdict.direction
