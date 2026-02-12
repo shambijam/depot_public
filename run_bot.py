@@ -3167,21 +3167,21 @@ def apply_pma_adjustments(
     # 📈 CALCUL DES BONUS (Validation & Alignement)
     # ══════════════════════════════════════════════════════
 
-    # BONUS 1: MTF Alignment 3/3 (+15 pts)
-    if mtf_verdict is not None and mtf_verdict.alignment_count == 3:
+    # BONUS 1: MTF Alignment 4/4 (+15 pts) — 12 FEV 2026: adapté pour M30+M15+M5+M1
+    if mtf_verdict is not None and mtf_verdict.alignment_count == 4:
         if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
            (mtf_direction == "BEARISH" and signal_action == "SELL"):
             pma_bonus += 15.0
             pma_adjustments.append(
-                f"BONUS_MTF_3/3: +15 (Alignement parfait {mtf_direction} + {signal_action})"
+                f"BONUS_MTF_4/4: +15 (Alignement parfait {mtf_direction} + {signal_action})"
             )
-    # BONUS 1b: MTF Alignment 2/3 (+10 pts)
-    elif mtf_verdict is not None and mtf_verdict.alignment_count == 2:
+    # BONUS 1b: MTF Alignment 3/4 (+10 pts)
+    elif mtf_verdict is not None and mtf_verdict.alignment_count == 3:
         if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
            (mtf_direction == "BEARISH" and signal_action == "SELL"):
             pma_bonus += 10.0
             pma_adjustments.append(
-                f"BONUS_MTF_2/3: +10 (Alignement {mtf_verdict.alignment} {mtf_direction} + {signal_action})"
+                f"BONUS_MTF_3/4: +10 (Alignement {mtf_verdict.alignment} {mtf_direction} + {signal_action})"
             )
 
     # BONUS 2: Niveaux Frais (+10 pts)
@@ -3478,6 +3478,7 @@ def scalping_worker(
             # ═══════════════════════════════════════════════════════════════
             rates_df_m5 = None
             rates_df_m15 = None
+            rates_df_m30 = None
             try:
                 rates_df_m5 = bars_cache.get_or_fetch(
                     symbol=asset,
@@ -3493,12 +3494,22 @@ def scalping_worker(
                     mt5_connector=mt5_connector,
                     ttl_seconds=60.0,
                 )
+                # 12 FEV 2026: M30 pour contexte macro (dominant dans pondération MTF)
+                rates_df_m30 = bars_cache.get_or_fetch(
+                    symbol=asset,
+                    timeframe="M30",
+                    count=10,  # 10 bougies M30 = 5 heures de contexte
+                    mt5_connector=mt5_connector,
+                    ttl_seconds=120.0,  # Cache 2 min (M30 change lentement)
+                )
                 if rates_df_m5 is not None and rates_df_m15 is not None:
-                    logger.debug(f"[{asset}] ✅ MTF data loaded: M5={len(rates_df_m5)} bars, M15={len(rates_df_m15)} bars")
+                    m30_info = f", M30={len(rates_df_m30)} bars" if rates_df_m30 is not None else ""
+                    logger.debug(f"[{asset}] ✅ MTF data loaded: M5={len(rates_df_m5)} bars, M15={len(rates_df_m15)} bars{m30_info}")
             except Exception as e_mtf_load:
-                logger.warning(f"[{asset}] ⚠️ Erreur chargement M5/M15 pour MTF: {e_mtf_load}")
+                logger.warning(f"[{asset}] ⚠️ Erreur chargement M5/M15/M30 pour MTF: {e_mtf_load}")
                 rates_df_m5 = None
                 rates_df_m15 = None
+                rates_df_m30 = None
 
             # 🎯 (05 JAN 2026): FENÊTRE GLISSANTE pour scalping sniper
             # Fix: Fenêtre M1 (60s) → scores identiques pendant 24 cycles
@@ -3726,17 +3737,52 @@ def scalping_worker(
                             f"prev_candle={prev_candle_time} {prev_candle_color} (analysée)"
                         )
 
-                        # Préparer asset_signals (03 JAN 2026: Ajouter ticks pour analyseurs institutionnels)
+                        # ═══════════════════════════════════════════════════════════════
+                        # 12 FEV 2026: MTF VERDICT AVANT l'orderflow
+                        # Le verdict MTF (M30+M15+M5+M1) est calculé ICI pour imposer
+                        # la direction à scalping.py via asset_signals["mtf_direction"]
+                        # ═══════════════════════════════════════════════════════════════
+                        mtf_verdict = None
+                        mtf_bonus = 0.0
+                        mtf_direction = "NEUTRAL"
+                        try:
+                            if price_memory_analyzer is not None:
+                                mtf_verdict = price_memory_analyzer.get_mtf_trend_verdict(
+                                    asset=asset,
+                                    candles_m30=rates_df_m30,
+                                    candles_m15=rates_df_m15,
+                                    candles_m5=rates_df_m5,
+                                    candles_m1=rates_df_fresh,
+                                    current_price=current_price
+                                )
+                                mtf_bonus = mtf_verdict.bonus
+                                mtf_direction = mtf_verdict.direction
+
+                                mtf_emoji = "🐻" if mtf_direction == "BEARISH" else ("🐂" if mtf_direction == "BULLISH" else "⚖️")
+                                logger.info(
+                                    f"{mtf_emoji} [MTF_VERDICT][{asset}] {mtf_direction} ({mtf_verdict.alignment}) | "
+                                    f"M30:{mtf_verdict.m30_direction} M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
+                                    f"Bonus: {mtf_bonus:+.0f} pts | Confidence: {mtf_verdict.confidence:.2f}"
+                                )
+                            else:
+                                logger.debug(f"[{asset}] PriceMemoryAnalyzer non disponible pour MTF")
+                        except Exception as e_mtf_verdict:
+                            logger.error(f"[{asset}] Erreur MTF verdict: {e_mtf_verdict}", exc_info=True)
+                            mtf_verdict = None
+                            mtf_bonus = 0.0
+                            mtf_direction = "NEUTRAL"
+
+                        # Préparer asset_signals avec mtf_direction imposée
                         asset_signals_for_of = {
                             "footprint_summary": {},
                             "orderflow_summary": {},
-                            "ticks_df": ticks_df,  # 🆕 Pour analyseurs institutionnels (Phase 1+2)
-                            "df_m15": rates_df_m15  # 🆕 10 FEV 2026: M15 pour MTF Queen Rule
+                            "ticks_df": ticks_df,
+                            "df_m15": rates_df_m15,
+                            "df_m30": rates_df_m30,
+                            "mtf_direction": mtf_direction  # 12 FEV 2026: direction imposée par PMA
                         }
 
                         # Appel OrderFlow V6
-                        # 🔧 10 FEV 2026: Passer rates_df_m5 (au lieu de None) pour que la stratégie
-                        # voie M5 et puisse appliquer le VETO MTF AVANT de décider BUY/SELL
                         of_v6_result = scalping_strategy._analyze_orderflow_v6(
                             asset=asset,
                             df_m1=rates_df_fresh,
@@ -3851,43 +3897,8 @@ def scalping_worker(
                     memory_net_direction = "FLAT"
                     memory_clarity = 0.0
 
-                # ═══════════════════════════════════════════════════════════════
-                # 🆕 25 JAN 2026: MTF TREND VERDICT (M15 + M5 + M1)
-                # Analyse multi-timeframe pour direction et bonus
-                # ═══════════════════════════════════════════════════════════════
-                mtf_verdict = None
-                mtf_bonus = 0.0
-                mtf_direction = "NEUTRAL"
-                try:
-                    if price_memory_analyzer is not None:
-                        mtf_verdict = price_memory_analyzer.get_mtf_trend_verdict(
-                            asset=asset,
-                            candles_m15=rates_df_m15,
-                            candles_m5=rates_df_m5,
-                            candles_m1=rates_df_fresh,
-                            current_price=current_price
-                        )
-                        mtf_bonus = mtf_verdict.bonus
-                        mtf_direction = mtf_verdict.direction
-
-                        # Emoji selon direction
-                        mtf_emoji = "🐻" if mtf_direction == "BEARISH" else ("🐂" if mtf_direction == "BULLISH" else "⚖️")
-
-                        logger.info(
-                            f"{mtf_emoji} [MTF_VERDICT][{asset}] {mtf_direction} ({mtf_verdict.alignment}) | "
-                            f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
-                            f"Bonus: {mtf_bonus:+.0f} pts | Confidence: {mtf_verdict.confidence:.2f}"
-                        )
-                    else:
-                        logger.debug(f"[{asset}] PriceMemoryAnalyzer non disponible pour MTF")
-
-                except Exception as e_mtf_verdict:
-                    logger.error(f"[{asset}] Erreur MTF verdict: {e_mtf_verdict}", exc_info=True)
-                    mtf_verdict = None
-                    mtf_bonus = 0.0
-                    mtf_direction = "NEUTRAL"
-
-                # Appliquer le bonus MTF au score composite (M15+M5+M1 alignés = +30 pts)
+                # 12 FEV 2026: MTF verdict déjà calculé AVANT l'orderflow (voir plus haut)
+                # Appliquer le bonus MTF au score composite (M30+M15+M5+M1 alignés)
                 if mtf_bonus > 0 and orderflow_result_mini.get('composite_enabled'):
                     score_before = orderflow_result_mini['score']
                     orderflow_result_mini['score'] = min(100.0, score_before + mtf_bonus)
@@ -4313,12 +4324,13 @@ def scalping_worker(
                             filtre1_confidence = 0.0
 
                             # ═══════════════════════════════════════════════════════════════
-                            # 🎯 10 FEV 2026: FILTRE 1 DELTA - RESPECTE MTF QUEEN
-                            # Le bias de scalping.py (filtre par MTF Queen M15+M5+M1)
+                            # 🎯 12 FEV 2026: FILTRE 1 DELTA - RESPECTE MTF QUEEN V2
+                            # Le bias de scalping.py (filtre par MTF Queen M30+M15+M5+M1)
                             # est la REFERENCE. Le Triple Filter ne peut PAS le contredire.
                             # ═══════════════════════════════════════════════════════════════
 
                             # Directions MTF pour logging
+                            m30_dir = mtf_verdict.m30_direction if mtf_verdict else "NO_DATA"
                             m15_dir = mtf_verdict.m15_direction if mtf_verdict else "NO_DATA"
                             m5_dir = mtf_verdict.m5_direction if mtf_verdict else "NO_DATA"
                             m1_dir = mtf_verdict.m1_direction if mtf_verdict else "NO_DATA"
@@ -4588,6 +4600,7 @@ def scalping_worker(
                                     "mtf": {
                                         "direction": mtf_direction,
                                         "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
+                                        "m30": mtf_verdict.m30_direction if mtf_verdict else "N/A",
                                         "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
                                         "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
                                         "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
@@ -4804,6 +4817,7 @@ def scalping_worker(
                                     "mtf": {
                                         "direction": mtf_direction,
                                         "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
+                                        "m30": mtf_verdict.m30_direction if mtf_verdict else "N/A",
                                         "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
                                         "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
                                         "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"

@@ -38,9 +38,10 @@ class MTFAnalysisResult:
 class MTFTrendVerdict:
     """Verdict MTF pour décision de trade"""
     direction: str  # BEARISH, BULLISH, NEUTRAL
-    alignment: str  # "3/3", "2/3", "1/3", "0/3"
-    alignment_count: int  # 0, 1, 2, 3
-    bonus: float  # +20, +15, 0
+    alignment: str  # "4/4", "3/4", "2/4", "1/4", "0/4"
+    alignment_count: int  # 0, 1, 2, 3, 4
+    bonus: float  # +30, +20, +10, +5, 0
+    m30_direction: str
     m15_direction: str
     m5_direction: str
     m1_direction: str
@@ -940,6 +941,7 @@ class PriceMemoryAnalyzer:
         """Initialise l'historique pour un asset s'il n'existe pas"""
         if asset not in self._mtf_history:
             self._mtf_history[asset] = {
+                'M30': deque(maxlen=self._history_maxlen),
                 'M15': deque(maxlen=self._history_maxlen),
                 'M5': deque(maxlen=self._history_maxlen),
                 'M1': deque(maxlen=self._history_maxlen)
@@ -1028,20 +1030,23 @@ class PriceMemoryAnalyzer:
     def get_mtf_trend_verdict(
         self,
         asset: str,
+        candles_m30: Optional[pd.DataFrame],
         candles_m15: Optional[pd.DataFrame],
         candles_m5: Optional[pd.DataFrame],
         candles_m1: Optional[pd.DataFrame],
         current_price: float,
-        filter_action: str = None  # <--- AJOUTEZ CECI
+        filter_action: str = None
     ) -> MTFTrendVerdict:
         """
         🎯 MÉTHODE PRINCIPALE - Verdict MTF pour décision BEARISH/BULLISH
 
-        Analyse M15 + M5 + M1 et retourne un verdict avec bonus
+        12 FEV 2026: Analyse M30 + M15 + M5 + M1 avec pondération macro-dominante.
+        M30+M15 bearish = TOUJOURS BEARISH, même si M5+M1 bullish.
 
         Args:
             asset: Symbole (NAS100, EURUSD, etc.)
-            candles_m15: DataFrame M15 (30-50 bougies recommandé)
+            candles_m30: DataFrame M30 (5-10 bougies = contexte macro)
+            candles_m15: DataFrame M15 (10+ bougies)
             candles_m5: DataFrame M5 (50-100 bougies recommandé)
             candles_m1: DataFrame M1 (50-100 bougies recommandé)
             current_price: Prix actuel
@@ -1052,11 +1057,14 @@ class PriceMemoryAnalyzer:
         self._init_asset_history(asset)
 
         # Analyser chaque timeframe
+        m30_result = None
         m15_result = None
         m5_result = None
         m1_result = None
 
-        # 🔧 16 JAN 2026: Minimum 1 bougie suffit (on regarde juste la dernière)
+        if candles_m30 is not None and len(candles_m30) >= 1:
+            m30_result = self.analyze_single_timeframe(asset, 'M30', candles_m30, current_price)
+
         if candles_m15 is not None and len(candles_m15) >= 1:
             m15_result = self.analyze_single_timeframe(asset, 'M15', candles_m15, current_price)
 
@@ -1066,9 +1074,14 @@ class PriceMemoryAnalyzer:
         if candles_m1 is not None and len(candles_m1) >= 1:
             m1_result = self.analyze_single_timeframe(asset, 'M1', candles_m1, current_price)
 
-        # 🔧 16 JAN 2026: Extraire les directions - JAMAIS NEUTRAL
-        # Si un TF n'a pas de données, on ne le compte pas
+        # Extraire les directions
         available_directions = []
+
+        if m30_result:
+            m30_dir = m30_result.direction
+            available_directions.append(m30_dir)
+        else:
+            m30_dir = 'NO_DATA'
 
         if m15_result:
             m15_dir = m15_result.direction
@@ -1093,34 +1106,29 @@ class PriceMemoryAnalyzer:
         bearish_count = sum(1 for d in available_directions if d == 'BEARISH')
         bullish_count = sum(1 for d in available_directions if d == 'BULLISH')
 
-        # 🆕 16 JAN 2026: Calculer le net_pips moyen pour bonus proportionnel
-        net_pips_values = []
-        if m15_result:
-            net_pips_values.append(abs(m15_result.net_pips))
-        if m5_result:
-            net_pips_values.append(abs(m5_result.net_pips))
-        if m1_result:
-            net_pips_values.append(abs(m1_result.net_pips))
-
-        # Prendre le MAX des net_pips (le TF le plus fort)
-        max_net_pips = max(net_pips_values) if net_pips_values else 0.0
-
-        # 🔧 16 JAN 2026: BONUS SIMPLE
-        # 3/3 = +30 | 2/3 = +15 | 1/3 = +5
-
-        # --- 08 FEV 2026: PONDÉRATION M15>M5>M1 (remplace dictature M1) ---
-        # M15 = 50%, M5 = 30%, M1 = 20%
-        # M1 n'a plus de droit de veto absolu
+        # --- 12 FEV 2026: PONDÉRATION M30>M15>M5>M1 (direction macro imposée) ---
+        # M30 = 40% (contexte macro dominant)
+        # M15 = 30% (direction confirmée)
+        # M5  = 20% (momentum court)
+        # M1  = 10% (bruit, poids minimal)
+        # M30+M15 bearish = -0.70 → TOUJOURS BEARISH même si M5+M1 bullish (+0.30)
         direction = 'NEUTRAL'
         alignment_count = 0
 
-        # Calcul du score pondéré
-        weight_m15 = 0.50
-        weight_m5 = 0.30
-        weight_m1 = 0.20
+        weight_m30 = 0.40
+        weight_m15 = 0.30
+        weight_m5 = 0.20
+        weight_m1 = 0.10
 
         weighted_score = 0.0  # positif = BULLISH, négatif = BEARISH
         total_weight = 0.0
+
+        if m30_result and m30_result.direction != "NO_DATA":
+            if m30_result.direction == "BULLISH":
+                weighted_score += weight_m30
+            elif m30_result.direction == "BEARISH":
+                weighted_score -= weight_m30
+            total_weight += weight_m30
 
         if m15_result and m15_result.direction != "NO_DATA":
             if m15_result.direction == "BULLISH":
@@ -1143,9 +1151,10 @@ class PriceMemoryAnalyzer:
                 weighted_score -= weight_m1
             total_weight += weight_m1
 
-        # Seuil de décision: score pondéré >= 0.30 pour direction claire
-        # (M15+M5 BEARISH = -0.80 → BEARISH même si M1 BULLISH: -0.80+0.20 = -0.60)
-        WEIGHTED_THRESHOLD = 0.30
+        # Seuil de décision: score pondéré >= 0.20 pour direction claire
+        # M30+M15 BEARISH = -0.70 → BEARISH même si M5+M1 BULLISH (-0.70+0.30 = -0.40)
+        # M30 BEARISH + M15 BULLISH = -0.40+0.30 = -0.10 → NEUTRAL (conflit haut TF)
+        WEIGHTED_THRESHOLD = 0.20
 
         if weighted_score >= WEIGHTED_THRESHOLD:
             direction = "BULLISH"
@@ -1161,31 +1170,36 @@ class PriceMemoryAnalyzer:
             self.logger.info(
                 f"[MTF_WEIGHTED][{asset}] Score pondéré: {weighted_score:+.2f} "
                 f"(seuil={WEIGHTED_THRESHOLD}) → {direction} | "
-                f"M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                f"M30:{m30_dir} M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
             )
 
-        # 👇👇👇 C'EST CETTE LIGNE QUI MANQUAIT 👇👇👇
-        alignment = f"{alignment_count}/3"
-        # 👆👆👆 ELLE RÉPARE L'ERREUR "alignment is not defined"
+        alignment = f"{alignment_count}/4"
 
-        # Bonus proportionnel
-        if alignment_count == 3:
+        # Bonus proportionnel (12 FEV 2026: adapté pour 4 TFs)
+        if alignment_count == 4:
             bonus = 30.0
+        elif alignment_count == 3:
+            bonus = 20.0
         elif alignment_count == 2:
-            bonus = 15.0
+            bonus = 10.0
         elif alignment_count == 1:
             bonus = 5.0
         else:
             bonus = 0.0
 
         should_override_delta = (direction == 'BEARISH')
-        confidence = alignment_count / 3.0 if alignment_count > 0 else 0.1
+        confidence = alignment_count / 4.0 if alignment_count > 0 else 0.1
 
         if self.logger:
             self.logger.debug(f"[MTF_BONUS] {direction} {alignment} → +{bonus:.0f} pts")
 
         # Construire le détail
         details = {
+            'm30': {
+                'direction': m30_dir,
+                'net_pips': m30_result.net_pips if m30_result else 0.0,
+                'clarity': m30_result.trend_clarity if m30_result else 0.0
+            },
             'm15': {
                 'direction': m15_dir,
                 'net_pips': m15_result.net_pips if m15_result else 0.0,
@@ -1203,7 +1217,9 @@ class PriceMemoryAnalyzer:
             },
             'bearish_count': bearish_count,
             'bullish_count': bullish_count,
+            'weighted_score': weighted_score,
             'history_size': {
+                'M30': len(self._mtf_history[asset]['M30']),
                 'M15': len(self._mtf_history[asset]['M15']),
                 'M5': len(self._mtf_history[asset]['M5']),
                 'M1': len(self._mtf_history[asset]['M1'])
@@ -1215,6 +1231,7 @@ class PriceMemoryAnalyzer:
             alignment=alignment,
             alignment_count=alignment_count,
             bonus=bonus,
+            m30_direction=m30_dir,
             m15_direction=m15_dir,
             m5_direction=m5_dir,
             m1_direction=m1_dir,
@@ -1229,7 +1246,7 @@ class PriceMemoryAnalyzer:
         # Log le verdict avec couleur de bougie
         if self.logger:
             emoji = "🐻" if direction == 'BEARISH' else "🐂"
-            # 🔧 16 JAN 2026: Afficher direction de chaque bougie - JAMAIS NEUTRAL
+
             def _tf_display(tf_dir):
                 if tf_dir == 'BEARISH':
                     return "🔴"
@@ -1241,7 +1258,7 @@ class PriceMemoryAnalyzer:
             self.logger.info(
                 f"{emoji} [MTF_VERDICT][{asset}] "
                 f"{direction} ({alignment}) | "
-                f"M15:{_tf_display(m15_dir)} M5:{_tf_display(m5_dir)} M1:{_tf_display(m1_dir)} | "
+                f"M30:{_tf_display(m30_dir)} M15:{_tf_display(m15_dir)} M5:{_tf_display(m5_dir)} M1:{_tf_display(m1_dir)} | "
                 f"Bonus: {bonus:+.0f} pts"
             )
 
@@ -1318,6 +1335,7 @@ class PriceMemoryAnalyzer:
     def should_take_bearish_trade(
         self,
         asset: str,
+        candles_m30: Optional[pd.DataFrame],
         candles_m15: Optional[pd.DataFrame],
         candles_m5: Optional[pd.DataFrame],
         candles_m1: Optional[pd.DataFrame],
@@ -1335,7 +1353,7 @@ class PriceMemoryAnalyzer:
 
         Args:
             asset: Symbole
-            candles_m15/m5/m1: DataFrames OHLCV
+            candles_m30/m15/m5/m1: DataFrames OHLCV
             current_price: Prix actuel
             orderflow_score: Score OrderFlow actuel (optionnel)
             delta_value: Valeur du delta actuel (optionnel)
@@ -1345,7 +1363,7 @@ class PriceMemoryAnalyzer:
         """
         # Obtenir le verdict MTF
         verdict = self.get_mtf_trend_verdict(
-            asset, candles_m15, candles_m5, candles_m1, current_price
+            asset, candles_m30, candles_m15, candles_m5, candles_m1, current_price
         )
 
         # Décision basée sur MTF (pas sur delta pour BEARISH)

@@ -290,13 +290,6 @@
           "comment": "07 JAN 2026: VETO trades après 52s (USDJPY plus permissif car moins volatile)"
         },
         "allowed_hours_gmt": [
-          0,
-          1,
-          2,
-          3,
-          4,
-          5,
-          6,
           7,
           8,
           9,
@@ -304,7 +297,9 @@
           14,
           15,
           16,
-          17
+          18,
+          19,
+          20
         ],
         "comment_hours": "06 JAN 2026 MODE SNIPER: Tokyo 0h-3h GMT + Londres 7h-10h GMT + Overlap Londres/NY 13h-17h GMT",
         "min_tick_rate": 1.5,

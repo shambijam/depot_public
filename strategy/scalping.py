@@ -1015,67 +1015,51 @@ class ScalpingStrategy(BaseStrategy):
             delta_direction = delta_details.get("direction", "neutral")
 
             # ═══════════════════════════════════════════════════════════════
-            # 👑 10 FEV 2026: MTF QUEEN RULE - VETO AVANT le bias
-            # La strategie refuse elle-meme d'emettre BUY en bearish.
-            # Remplace toutes les corrections MTF post-hoc dans run_bot.py.
+            # 👑 12 FEV 2026: MTF QUEEN RULE V2 - Direction IMPOSÉE par PMA
+            # Le price_memory_analyzer analyse M30+M15+M5+M1 et donne un verdict.
+            # La stratégie REFUSE d'émettre un signal contre ce verdict.
             # ═══════════════════════════════════════════════════════════════
-            m1_dir = result["mtf_alignment"].get("m1", "neutral")
-            m5_dir = result["mtf_alignment"].get("m5", "neutral")
+            mtf_direction = asset_signals.get("mtf_direction", "NEUTRAL")
 
-            # M15 direction (via asset_signals, injecte par run_bot.py)
-            df_m15 = asset_signals.get("df_m15", None)
-            m15_dir = "neutral"
-            if df_m15 is not None and isinstance(df_m15, pd.DataFrame) and len(df_m15) > 0:
-                m15_dir = calculate_mtf_direction_unified(
-                    df_m15, 1, bullish_threshold, bearish_threshold
-                ).lower()
-
-            # Alignement MTF - M15 est la REINE, les 3 doivent etre alignes
-            mtf_3_3_bullish = (m15_dir == "bullish" and m5_dir == "bullish" and m1_dir == "bullish")
-            mtf_3_3_bearish = (m15_dir == "bearish" and m5_dir == "bearish" and m1_dir == "bearish")
-
-            # Appliquer bias + VETO MTF
             result["mtf_veto"] = False
             result["mtf_3_3"] = False
             result["mtf_conflict"] = False
             result["mtf_bonus"] = False
 
             if delta_direction == "bullish":
-                if mtf_3_3_bullish:
-                    # M15+M5+M1 tous BULLISH → BUY autorise
+                if mtf_direction == "BULLISH":
                     result["bias"] = "BUY"
                     result["mtf_3_3"] = True
                     result["mtf_bonus"] = True
                     result["total_score"] = min(100.0, result["total_score"] + 15)
                     self.logger.info(
-                        f"[MTF_QUEEN][{asset}] BUY AUTORISE - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} 3/3 BULLISH → +15 pts (score={result['total_score']}/100)"
+                        f"[MTF_QUEEN][{asset}] BUY AUTORISE - MTF={mtf_direction} + delta={delta_direction} → +15 pts (score={result['total_score']}/100)"
                     )
                 else:
-                    # M15 ou M5 ou M1 pas aligne → VETO
+                    # MTF dit BEARISH ou NEUTRAL → pas de BUY
                     result["bias"] = "NEUTRAL"
                     result["mtf_veto"] = True
                     result["mtf_conflict"] = True
                     self.logger.warning(
-                        f"[MTF_QUEEN][{asset}] VETO BUY - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} pas 3/3 BULLISH (delta={delta_direction})"
+                        f"[MTF_QUEEN][{asset}] VETO BUY - MTF={mtf_direction} vs delta={delta_direction}"
                     )
 
             elif delta_direction == "bearish":
-                if mtf_3_3_bearish:
-                    # M15+M5+M1 tous BEARISH → SELL autorise
+                if mtf_direction == "BEARISH":
                     result["bias"] = "SELL"
                     result["mtf_3_3"] = True
                     result["mtf_bonus"] = True
                     result["total_score"] = min(100.0, result["total_score"] + 15)
                     self.logger.info(
-                        f"[MTF_QUEEN][{asset}] SELL AUTORISE - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} 3/3 BEARISH → +15 pts (score={result['total_score']}/100)"
+                        f"[MTF_QUEEN][{asset}] SELL AUTORISE - MTF={mtf_direction} + delta={delta_direction} → +15 pts (score={result['total_score']}/100)"
                     )
                 else:
-                    # M15 ou M5 ou M1 pas aligne → VETO
+                    # MTF dit BULLISH ou NEUTRAL → pas de SELL
                     result["bias"] = "NEUTRAL"
                     result["mtf_veto"] = True
                     result["mtf_conflict"] = True
                     self.logger.warning(
-                        f"[MTF_QUEEN][{asset}] VETO SELL - M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} pas 3/3 BEARISH (delta={delta_direction})"
+                        f"[MTF_QUEEN][{asset}] VETO SELL - MTF={mtf_direction} vs delta={delta_direction}"
                     )
 
             else:
