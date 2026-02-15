@@ -814,6 +814,529 @@ class DecisionPipeline:
 
         return exit_decisions
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 🎯 15 FEV 2026: DECIDE SCALP ACTION — Centralisation logique de décision
+    # Migré depuis run_bot.py scalping_worker() (lignes 2624-3406)
+    # ═══════════════════════════════════════════════════════════════════════════
+    def decide_scalp_action(
+        self,
+        asset: str,
+        orderflow_result_mini: dict,
+        mtf_verdict,
+        mtf_direction: str,
+        timing_verdict: dict,
+        micro_resistance_info: dict,
+        inst_result: dict,
+        inst_score: float,
+        inst_veto_fatigue: bool,
+        inst_veto_reversal: bool,
+        memory_clarity: float,
+        memory_trend_strength: float,
+        memory_trend_direction: str,
+        market_results: dict,
+        scalping_config_global: dict,
+        asset_cfg: dict,
+        price_memory_analyzer,
+        rates_df_fresh,
+        current_price: float,
+        point: float,
+        digits: int,
+        latest: dict,
+        ctx: dict,
+        logger_ref=None,
+    ) -> dict:
+        """
+        Centralise TOUTE la logique de décision scalping (3 branches).
+
+        Retourne fusion_out dict avec:
+            ok, action, fused_confidence, signal_type, rationale,
+            orderflow_score, price_memory, institutional, etc.
+        """
+        _log = logger_ref or self.logger
+
+        # ========== ÉTAPE 3: DÉCISION INTELLIGENTE (Veto pondéré) ==========
+        veto_score = timing_verdict.get("veto_score", 0.0) if timing_verdict else 0.0
+        orderflow_score_raw = orderflow_result_mini['score']
+        orderflow_score = orderflow_score_raw
+
+        # 🎯 LOGIQUE INTELLIGENTE: Signal fort peut passer outre veto modéré
+        can_override_veto = False
+        override_reason = None
+
+        if orderflow_score >= 90.0 and veto_score < 70.0:
+            can_override_veto = True
+            override_reason = f"Signal exceptionnel ({orderflow_score:.0f}/100) > veto ({veto_score:.0f}/100)"
+        elif orderflow_score >= 85.0 and veto_score < 60.0:
+            can_override_veto = True
+            override_reason = f"Signal très fort ({orderflow_score:.0f}/100) > veto modéré ({veto_score:.0f}/100)"
+
+        # Décision finale
+        timing_blocks_trade = (
+            timing_verdict
+            and timing_verdict.get("verdict") != "PASS"
+            and not can_override_veto
+        )
+
+        _log.critical(
+            f"[DECISION_LOGIC][{asset}] timing_blocks_trade={timing_blocks_trade} | "
+            f"can_override_veto={can_override_veto} | "
+            f"timing_verdict={timing_verdict.get('verdict') if timing_verdict else None} | "
+            f"orderflow_score={orderflow_score:.1f} | "
+            f"veto_score={veto_score:.1f}"
+        )
+
+        # Initialisation decision_mini
+        decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": "Non analysé", "anchor_price": None}
+
+        # ═══════════════════════════════════════════════════════════════
+        # BRANCHE 1: TIMING_VETO → HOLD
+        # ═══════════════════════════════════════════════════════════════
+        if timing_blocks_trade:
+            _log.critical(f"[DECISION_BRANCH][{asset}] ➡️ BRANCHE 1: TIMING_VETO (score={orderflow_score:.1f} < 85, veto={veto_score:.1f})")
+            veto_reason = timing_verdict.get('veto_reason', 'Unknown')
+            _log.info(
+                f"⚠️  [TIMING_VETO] {veto_reason} (veto={veto_score:.0f}) "
+                f"→ HOLD (OrderFlow score={orderflow_score:.1f} insuffisant pour override)"
+            )
+
+            decision_mini = {
+                "action": "HOLD",
+                "confidence": 0.0,
+                "rationale": f"TIMING VETO: {veto_reason} (OrderFlow {orderflow_score:.0f}/100 < override threshold)",
+                "anchor_price": None
+            }
+
+            return {
+                "ok": False,
+                "action": "HOLD",
+                "fused_confidence": 0.0,
+                "signal_type": "TIMING_VETO",
+                "veto_reason": veto_reason,
+                "veto_score": veto_score,
+                "orderflow_score": orderflow_score
+            }
+
+        # ═══════════════════════════════════════════════════════════════
+        # BRANCHE 2: OVERRIDE_VETO (score ≥ 85)
+        # BRANCHE 3: PASS_NORMAL (timing OK, score < 85)
+        # → Logique consolidée (identique sauf Triple Filtre en B2)
+        # ═══════════════════════════════════════════════════════════════
+        is_override = can_override_veto
+        branch_name = "BRANCHE 2: OVERRIDE_VETO" if is_override else "BRANCHE 3: PASS_NORMAL"
+
+        if is_override:
+            _log.critical(f"[DECISION_BRANCH][{asset}] ➡️ {branch_name} (score={orderflow_score:.1f} ≥ 85)")
+            _log.info(f"🚀 [VETO_OVERRIDE] {override_reason} → Signal autorisé malgré timing non optimal")
+        else:
+            _log.critical(f"[DECISION_BRANCH][{asset}] ➡️ {branch_name} (timing=PASS, score={orderflow_score:.1f} < 85)")
+
+        # ════════════════════════════════════════════════════════════
+        # VETO PHASE DE MARCHÉ DYNAMIQUE (commun B2 + B3)
+        # ════════════════════════════════════════════════════════════
+        blocked_phases_config = scalping_config_global.get("entry_rules", {}).get("scalping", {}).get("blocked_phases", {})
+        blocked_phases_enabled = blocked_phases_config.get("enabled", True)
+        blocked_phases_list = blocked_phases_config.get("phases", ["range", "accumulation", "range_accumulation", "range_distribution"])
+
+        latest_candle = market_results.get("latest", {})
+        current_regime = latest_candle.get("regime", "unknown")
+        phase_str = str(current_regime).lower() if current_regime else "unknown"
+
+        phase_is_blocked = blocked_phases_enabled and any(blocked in phase_str for blocked in blocked_phases_list)
+
+        _log.critical(
+            f"[PHASE_CONFIG_CHECK][{asset}] blocked_phases={blocked_phases_list} | "
+            f"enabled={blocked_phases_enabled} | current_regime={phase_str} | is_blocked={phase_is_blocked}"
+        )
+
+        if phase_is_blocked:
+            _log.critical(
+                f"[REGIME_CONFIG_VETO][{asset}] 🚫 RÉGIME '{phase_str}' INTERDIT ! "
+                f"Régimes bloqués (config): {blocked_phases_list}"
+            )
+            _log.info(f"[MINIMALIST][{asset}] HOLD | rationale=REGIME VETO: {phase_str}")
+
+            return {
+                "ok": False,
+                "action": "HOLD",
+                "fused_confidence": 0.0,
+                "signal_type": "REGIME_VETO",
+                "veto_reason": f"Régime '{phase_str}' interdit",
+                "orderflow_score": orderflow_result_mini["score"]
+            }
+
+        # ════════════════════════════════════════════════════════════
+        # BUILD DECISION (commun B2 + B3)
+        # ════════════════════════════════════════════════════════════
+        # min_score par défaut: 65 pour override, 60 pour normal
+        asset_min_score_default = 65.0 if is_override else 60.0
+        asset_min_score_worker = asset_min_score_default
+        try:
+            asset_min_score_worker = float(
+                (asset_cfg.get("overrides", {}) or {})
+                .get("scalping", {})
+                .get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+                .get("min_score", asset_min_score_default)
+            )
+            _log.debug(f"[CONFIG_WORKER][{asset}] min_score={asset_min_score_worker} (from asset config)")
+        except Exception as e_min_score_worker:
+            _log.warning(f"[CONFIG_WORKER][{asset}] Erreur lecture min_score: {e_min_score_worker}, using default={asset_min_score_default}")
+
+        try:
+            if self.market_analyzer:
+                decision_mini = self.market_analyzer.build_decision(
+                    orderflow_result=orderflow_result_mini,
+                    min_score=asset_min_score_worker
+                )
+            else:
+                decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
+
+            _log.info(
+                f"[DECISION][{asset}] action={decision_mini['action']} | "
+                f"confidence={decision_mini['confidence']:.2f} | "
+                f"rationale={decision_mini['rationale']}"
+            )
+        except Exception as e_decision:
+            _log.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
+            decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
+
+        # ════════════════════════════════════════════════════════════
+        # TRIPLE FILTRE (Branche 2 seulement)
+        # ════════════════════════════════════════════════════════════
+        if is_override:
+            try:
+                # Momentum calculation
+                price_change_pips = 0.0
+                try:
+                    momentum_config = asset_cfg.get("overrides", {}).get("scalping", {}).get("orderflow_v6", {}).get("momentum_filter", {})
+                    momentum_enabled = momentum_config.get("enabled", False)
+
+                    if momentum_enabled:
+                        lookback_bars = momentum_config.get("lookback_bars", 3)
+                        if rates_df_fresh is not None and len(rates_df_fresh) >= lookback_bars:
+                            price_start = rates_df_fresh.iloc[-(lookback_bars + 1)]['close']
+                            price_current = rates_df_fresh.iloc[-1]['close']
+                            price_change_points = (price_current - price_start) / point if point > 0 else 0.0
+
+                            if digits in (3, 5):
+                                price_change_pips = price_change_points / 10.0
+                            else:
+                                price_change_pips = price_change_points
+
+                            _log.info(
+                                f"[MOMENTUM_CALC][{asset}] Mouvement sur {lookback_bars} bougies: "
+                                f"{price_start:.5f} → {price_current:.5f} = {price_change_pips:+.1f} pips"
+                            )
+                except Exception as e_momentum:
+                    _log.error(f"[MOMENTUM_CALC][{asset}] Erreur: {e_momentum}", exc_info=True)
+                    price_change_pips = 0.0
+
+                # TRIPLE FILTRE
+                momentum_config = asset_cfg.get("overrides", {}).get("scalping", {}).get("orderflow_v6", {}).get("momentum_filter", {})
+                min_price_change_pips = momentum_config.get("min_price_change_pips", 5.0)
+
+                # Récupération données
+                delta_m1 = orderflow_result_mini.get("summary", {}).get("delta", 0.0)
+                cvd_slope = orderflow_result_mini.get("summary", {}).get("cvd_slope", 0.0)
+                vol_ratio = orderflow_result_mini.get("summary", {}).get("vol_ratio", 1.0)
+                original_score = orderflow_result_mini.get("score", 0.0)
+
+                fp_summary = orderflow_result_mini.get("footprint_summary", {})
+                tickrate = fp_summary.get("tickrate", 0.0)
+                coverage_s = fp_summary.get("coverage_s", 0.0)
+
+                # FILTRE 1: DELTA PONDÉRÉ MULTI-TIMEFRAME
+                delta_weighted = 0.0
+                delta_m3 = price_change_pips
+                delta_weighted = (delta_m1 * 0.6) + (delta_m3 * 0.4)
+
+                cvd_aligned = False
+                if delta_weighted > 0 and cvd_slope > 0:
+                    cvd_aligned = True
+                elif delta_weighted < 0 and cvd_slope < 0:
+                    cvd_aligned = True
+
+                delta_threshold = min_price_change_pips * 3
+
+                filtre1_direction = "HOLD"
+                filtre1_confidence = 0.0
+
+                # MTF directions pour logging
+                m30_dir = mtf_verdict.m30_direction if mtf_verdict else "NO_DATA"
+                m15_dir = mtf_verdict.m15_direction if mtf_verdict else "NO_DATA"
+                m5_dir = mtf_verdict.m5_direction if mtf_verdict else "NO_DATA"
+                m1_dir = mtf_verdict.m1_direction if mtf_verdict else "NO_DATA"
+
+                of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
+
+                if of_bias == "NEUTRAL":
+                    filtre1_direction = "HOLD"
+                    filtre1_confidence = 0.0
+                    _log.info(
+                        f"[FILTRE1_DELTA][{asset}] HOLD - MTF Queen VETO (bias=NEUTRAL) | "
+                        f"Delta={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                    )
+                elif of_bias == "BUY" and delta_weighted > 0 and abs(delta_weighted) >= delta_threshold:
+                    filtre1_direction = "BUY"
+                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                    if cvd_aligned:
+                        filtre1_confidence = min(1.0, filtre1_confidence + 0.10)
+                    _log.info(
+                        f"[FILTRE1_DELTA][{asset}] BUY | Delta={delta_weighted:.1f} | bias={of_bias} | "
+                        f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                    )
+                elif of_bias == "SELL" and delta_weighted < 0 and abs(delta_weighted) >= delta_threshold:
+                    filtre1_direction = "SELL"
+                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                    if cvd_aligned:
+                        filtre1_confidence = min(1.0, filtre1_confidence + 0.10)
+                    _log.info(
+                        f"[FILTRE1_DELTA][{asset}] SELL | Delta={delta_weighted:.1f} | bias={of_bias} | "
+                        f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                    )
+                else:
+                    _log.debug(
+                        f"[FILTRE1_DELTA][{asset}] HOLD - Delta={delta_weighted:.1f} seuil={delta_threshold:.1f} bias={of_bias} | "
+                        f"MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                    )
+
+                filtre1_status = "✅ PASS" if filtre1_direction in ["BUY", "SELL"] else "❌ FAIL"
+                filtre1_detail = f"Δw={delta_weighted:.1f} | MTF: M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} | CVD:{cvd_slope:.2f}"
+
+                # FILTRE 2: MICROSTRUCTURE
+                conditions_micro = []
+                volume_strong = vol_ratio > 1.5
+                conditions_micro.append(("Volume>150%", volume_strong, f"ratio={vol_ratio:.2f}"))
+
+                tickrate_min_threshold = 2.0
+                if asset == "USDCHF":
+                    tickrate_min_threshold = 1.8
+                elif asset == "USDJPY":
+                    tickrate_min_threshold = 1.5
+
+                activity_high = tickrate >= tickrate_min_threshold
+                conditions_micro.append(("Ticks>min", activity_high, f"{tickrate:.1f} (min={tickrate_min_threshold})"))
+
+                no_gaps = coverage_s >= 5.0
+                conditions_micro.append(("Coverage>5s", no_gaps, f"{coverage_s:.1f}s"))
+                conditions_micro.append(("CVD aligned", cvd_aligned, f"slope={cvd_slope:.2f}"))
+
+                micro_passed = sum(1 for _, passed, _ in conditions_micro if passed)
+                filtre2_pass = micro_passed >= 3
+                filtre2_status = f"✅ PASS ({micro_passed}/4)" if filtre2_pass else f"❌ FAIL ({micro_passed}/4)"
+                filtre2_detail = " | ".join([f"{name}:{'✅' if p else '❌'}({d})" for name, p, d in conditions_micro])
+
+                # FILTRE 3: CONTEXTE
+                conditions_context = []
+                fatigue_ok = True
+                conditions_context.append(("Fatigue OK", fatigue_ok, "N/A"))
+
+                memory_fresh = memory_clarity >= 0.5
+                conditions_context.append(("Memory fresh", memory_fresh, f"clarity={memory_clarity:.0%}"))
+
+                memory_aligned = False
+                if filtre1_direction == "BUY" and memory_trend_direction == "BULLISH":
+                    memory_aligned = True
+                elif filtre1_direction == "SELL" and memory_trend_direction == "BEARISH":
+                    memory_aligned = True
+                conditions_context.append(("Memory aligned", memory_aligned, f"{memory_trend_direction}"))
+
+                context_passed = sum(1 for _, passed, _ in conditions_context if passed)
+                filtre3_pass = context_passed >= 2
+                filtre3_status = f"✅ PASS ({context_passed}/3)" if filtre3_pass else f"❌ FAIL ({context_passed}/3)"
+                filtre3_detail = " | ".join([f"{name}:{'✅' if p else '❌'}({d})" for name, p, d in conditions_context])
+
+                # DÉCISION FINALE: LES 3 FILTRES DOIVENT PASSER
+                all_filters_pass = filtre1_direction in ["BUY", "SELL"] and filtre2_pass and filtre3_pass
+
+                bonus_memory = 30 if memory_aligned else 0
+                adjusted_score = original_score + bonus_memory
+
+                if all_filters_pass and adjusted_score >= asset_min_score_worker:
+                    decision_mini["action"] = filtre1_direction
+                    decision_mini["confidence"] = filtre1_confidence
+                    decision_mini["rationale"] = (
+                        f"TRIPLE_FILTER: {filtre1_direction} | "
+                        f"F1:{filtre1_status} F2:{filtre2_status} F3:{filtre3_status} | "
+                        f"Score: {original_score:.1f}+{bonus_memory} = {adjusted_score:.1f}"
+                    )
+                    orderflow_result_mini["score"] = adjusted_score
+
+                    _log.info(
+                        f"[TRIPLE_FILTER][{asset}] ✅ {filtre1_direction} VALIDÉ | "
+                        f"F1: {filtre1_detail} | "
+                        f"F2: {filtre2_detail} | "
+                        f"F3: {filtre3_detail} | "
+                        f"Score: {original_score:.1f} → {adjusted_score:.1f}"
+                    )
+                else:
+                    decision_mini["action"] = "HOLD"
+                    decision_mini["confidence"] = 0.0
+
+                    reject_reasons = []
+                    if filtre1_direction == "HOLD":
+                        reject_reasons.append(f"F1_FAIL(Δw={delta_weighted:.1f}<{delta_threshold:.1f})")
+                    if not filtre2_pass:
+                        reject_reasons.append(f"F2_FAIL({micro_passed}/4)")
+                    if not filtre3_pass:
+                        reject_reasons.append(f"F3_FAIL({context_passed}/3)")
+                    if adjusted_score < asset_min_score_worker:
+                        reject_reasons.append(f"SCORE({adjusted_score:.1f}<{asset_min_score_worker})")
+
+                    reject_str = " + ".join(reject_reasons)
+                    decision_mini["rationale"] = f"TRIPLE_FILTER: HOLD - {reject_str}"
+
+                    _log.info(
+                        f"[TRIPLE_FILTER][{asset}] ⏸️ HOLD | "
+                        f"Direction: {filtre1_direction} | "
+                        f"F1: {filtre1_detail} | "
+                        f"F2: {filtre2_detail} | "
+                        f"F3: {filtre3_detail} | "
+                        f"Rejet: {reject_str}"
+                    )
+
+            except Exception as e_triple_filter:
+                _log.error(f"[TRIPLE_FILTER][{asset}] Erreur: {e_triple_filter}", exc_info=True)
+
+        # ════════════════════════════════════════════════════════════
+        # PMA ADJUSTMENTS (commun B2 + B3)
+        # ════════════════════════════════════════════════════════════
+        pma_bonus = 0.0
+        pma_malus = 0.0
+        pma_adjustments = []
+        pma_veto_dur = False
+
+        try:
+            signal_action = decision_mini.get("action", "HOLD")
+
+            pma_result = apply_pma_adjustments(
+                signal_action=signal_action,
+                orderflow_score=orderflow_score,
+                mtf_verdict=mtf_verdict,
+                mtf_direction=mtf_direction,
+                micro_resistance_info=micro_resistance_info,
+                inst_result=inst_result,
+                inst_score=inst_score,
+                inst_veto_fatigue=inst_veto_fatigue,
+                inst_veto_reversal=inst_veto_reversal,
+                current_regime=current_regime,
+                memory_clarity=memory_clarity,
+                memory_trend_strength=memory_trend_strength,
+                memory_trend_direction=memory_trend_direction,
+                price_memory_analyzer=price_memory_analyzer,
+                rates_df_fresh=rates_df_fresh,
+                current_price=current_price,
+                asset=asset,
+                logger_ref=_log,
+            )
+
+            pma_bonus = pma_result["pma_bonus"]
+            pma_malus = pma_result["pma_malus"]
+            pma_adjustments = pma_result["pma_adjustments"]
+            pma_veto_dur = pma_result["pma_veto_dur"]
+            inst_veto_reversal = pma_result["inst_veto_reversal"]
+            score_brut = pma_result["score_brut"]
+            score_ajuste = pma_result["score_ajuste"]
+            pma_adjustment_total = pma_result["pma_adjustment"]
+
+            # Stocker dans orderflow_result_mini pour traçabilité
+            orderflow_result_mini['pma_bonus'] = pma_bonus
+            orderflow_result_mini['pma_malus'] = pma_malus
+            orderflow_result_mini['pma_adjustment'] = pma_adjustment_total
+            orderflow_result_mini['pma_adjustments'] = pma_adjustments
+            orderflow_result_mini['score_before_pma'] = score_brut
+            orderflow_result_mini['score'] = score_ajuste
+
+            # Appliquer VETO DUR
+            if pma_veto_dur and signal_action in ["BUY", "SELL"]:
+                old_action = decision_mini["action"]
+                decision_mini["action"] = "HOLD"
+                decision_mini["confidence"] = 0.0
+                decision_mini["rationale"] = (
+                    f"PMA_VETO_DUR: Score {score_ajuste:.1f} < 60 | "
+                    f"Brut={score_brut:.1f} + Bonus={pma_bonus:.0f} - Malus={pma_malus:.0f} | "
+                    f"Original: {old_action}"
+                )
+
+            # Appliquer VETO REVERSAL
+            if inst_veto_reversal and signal_action in ["BUY", "SELL"]:
+                old_action = decision_mini["action"]
+                decision_mini["action"] = "HOLD"
+                decision_mini["confidence"] = 0.0
+                decision_mini["rationale"] = (
+                    f"🚫 VETO_REVERSAL: Renversement institutionnel détecté | "
+                    f"Original: {old_action}"
+                )
+
+        except Exception as e_pma:
+            _log.error(f"[PMA_ADJUSTMENT][{asset}] Erreur: {e_pma}", exc_info=True)
+
+        # ════════════════════════════════════════════════════════════
+        # CONSTRUCTION fusion_out (commun B2 + B3)
+        # ════════════════════════════════════════════════════════════
+        if decision_mini["action"] in ["BUY", "SELL"]:
+            anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
+
+            fusion_out = {
+                "ok": True,
+                "action": decision_mini["action"],
+                "fused_confidence": decision_mini["confidence"],
+                "signal_type": "MINIMALIST_ORDERFLOW",
+                "rationale": decision_mini["rationale"],
+                "orderflow_score": orderflow_result_mini["score"],
+                "timing_quality": timing_verdict.get("quality_metrics", {}),
+                "price": anchor_price,
+                "context": ctx,
+                "price_memory": {
+                    "score_brut": orderflow_result_mini.get("score_before_pma", orderflow_result_mini["score"]),
+                    "score_ajuste": orderflow_result_mini["score"],
+                    "pma_bonus": pma_bonus,
+                    "pma_malus": pma_malus,
+                    "pma_adjustment": pma_bonus - pma_malus,
+                    "adjustments": pma_adjustments,
+                    "veto_dur": pma_veto_dur,
+                    "mtf": {
+                        "direction": mtf_direction,
+                        "alignment": mtf_verdict.alignment if mtf_verdict else "N/A",
+                        "m30": mtf_verdict.m30_direction if mtf_verdict else "N/A",
+                        "m15": mtf_verdict.m15_direction if mtf_verdict else "N/A",
+                        "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
+                        "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
+                    },
+                    "micro_resistance": micro_resistance_info
+                },
+                "institutional": {
+                    "score": inst_score,
+                    "conviction": inst_result.get('conviction_level', 'N/A') if inst_result else 'N/A',
+                    "trend": inst_result.get('new_trend', 'N/A') if inst_result else 'N/A',
+                    "reversal_detected": inst_result.get('reversal_detected', False) if inst_result else False,
+                    "veto_fatigue": inst_veto_fatigue,
+                    "veto_reversal": inst_veto_reversal
+                }
+            }
+
+            _log.info(
+                f"🎯 [MINIMALIST][{asset}] ✅ {fusion_out['action']} | "
+                f"confidence={fusion_out['fused_confidence']:.2f} | "
+                f"Score: {orderflow_result_mini.get('score_before_pma', orderflow_result_mini['score']):.1f} → {orderflow_result_mini['score']:.1f}"
+            )
+        else:
+            fusion_out = {
+                "ok": False,
+                "action": "HOLD",
+                "fused_confidence": 0.0,
+                "signal_type": "MINIMALIST_HOLD",
+                "rationale": decision_mini["rationale"],
+                "orderflow_score": orderflow_result_mini["score"]
+            }
+
+            _log.info(
+                f"[MINIMALIST][{asset}] HOLD | rationale={decision_mini['rationale']}"
+            )
+
+        return fusion_out
+
     # ---- Helpers locaux robustes ----
     def _pos_id(p: Dict[str, Any]) -> Any:
         return (
@@ -2334,3 +2857,196 @@ class DecisionPipeline:
             "risk_pct_info": risk_pct,
             "contract_info": contract,
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🧠 15 FEV 2026: APPLY PMA ADJUSTMENTS — Migré depuis run_bot.py
+# Fonction pure (module-level) — calcule Bonus/Malus/Veto PMA
+# ═══════════════════════════════════════════════════════════════════════════
+
+def apply_pma_adjustments(
+    signal_action: str,
+    orderflow_score: float,
+    mtf_verdict,
+    mtf_direction: str,
+    micro_resistance_info: dict,
+    inst_result: dict,
+    inst_score: float,
+    inst_veto_fatigue: bool,
+    inst_veto_reversal: bool,
+    current_regime: str,
+    memory_clarity: float,
+    memory_trend_strength: float,
+    memory_trend_direction: str,
+    price_memory_analyzer,
+    rates_df_fresh,
+    current_price: float,
+    asset: str,
+    logger_ref=None,
+) -> dict:
+    """
+    Calcule les ajustements PMA (Bonus/Malus) et les vetos.
+    Retourne un dict avec toutes les infos d'ajustement.
+
+    Returns:
+        {
+            "pma_bonus": float,
+            "pma_malus": float,
+            "pma_adjustment": float,
+            "pma_adjustments": list[str],
+            "pma_veto_dur": bool,
+            "inst_veto_reversal": bool,
+            "score_brut": float,
+            "score_ajuste": float,
+        }
+    """
+    pma_bonus = 0.0
+    pma_malus = 0.0
+    pma_adjustments = []
+    pma_veto_dur = False
+    _inst_veto_reversal = inst_veto_reversal  # copie locale modifiable
+
+    # ══════════════════════════════════════════════════════
+    # 📉 CALCUL DES MALUS (Risque & Veto)
+    # ══════════════════════════════════════════════════════
+
+    # MALUS 1: Micro-Résistance M1 (-30 pts)
+    if (signal_action == "BUY" and
+        micro_resistance_info.get('strength') in ['STRONG', 'MODERATE'] and
+        micro_resistance_info.get('distance_pips', 999) < 1.0 and
+        micro_resistance_info.get('bounce_probability', 0) >= 0.7):
+        pma_malus += 30.0
+        pma_adjustments.append(
+            f"MALUS_MICRO_RES: -30 (Résistance {micro_resistance_info['strength']} à {micro_resistance_info['distance_pips']:.2f} pips)"
+        )
+
+    # MALUS 2: Contre-Tendance MTF → SUPPRIMÉ 10 FEV 2026
+    # La stratégie (scalping.py) applique désormais le VETO MTF AVANT le bias.
+
+    # MALUS 3: Zone Range/Accumulation (-20 pts)
+    current_regime_lower = str(current_regime).lower() if current_regime else "unknown"
+    if any(rg in current_regime_lower for rg in ["range", "accumulation", "distribution"]):
+        if signal_action in ["BUY", "SELL"]:
+            pma_malus += 20.0
+            pma_adjustments.append(
+                f"MALUS_REGIME: -20 (Régime '{current_regime}' incompatible avec {signal_action})"
+            )
+
+    # MALUS 4: VETO FATIGUE (Circuit Breaker) (-50 pts)
+    if inst_veto_fatigue:
+        pma_malus += 50.0
+        pma_adjustments.append(
+            f"MALUS_FATIGUE: -50 (Circuit Breaker - Marché épuisé)"
+        )
+
+    # ══════════════════════════════════════════════════════
+    # 📈 CALCUL DES BONUS (Validation & Alignement)
+    # ══════════════════════════════════════════════════════
+
+    # BONUS 1: MTF Alignment 4/4 (+15 pts)
+    if mtf_verdict is not None and mtf_verdict.alignment_count == 4:
+        if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
+           (mtf_direction == "BEARISH" and signal_action == "SELL"):
+            pma_bonus += 15.0
+            pma_adjustments.append(
+                f"BONUS_MTF_4/4: +15 (Alignement parfait {mtf_direction} + {signal_action})"
+            )
+    # BONUS 1b: MTF Alignment 3/4 (+10 pts)
+    elif mtf_verdict is not None and mtf_verdict.alignment_count == 3:
+        if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
+           (mtf_direction == "BEARISH" and signal_action == "SELL"):
+            pma_bonus += 10.0
+            pma_adjustments.append(
+                f"BONUS_MTF_3/4: +10 (Alignement {mtf_verdict.alignment} {mtf_direction} + {signal_action})"
+            )
+
+    # BONUS 2: Niveaux Frais (+10 pts)
+    if price_memory_analyzer is not None:
+        try:
+            fresh_levels = price_memory_analyzer.find_fresh_levels(
+                historical_data=rates_df_fresh,
+                current_price=current_price,
+                lookback=20
+            )
+            if fresh_levels and len(fresh_levels) > 0:
+                for level in fresh_levels:
+                    distance_pips = abs(current_price - level) * 10000
+                    if distance_pips < 2.0:
+                        pma_bonus += 10.0
+                        pma_adjustments.append(
+                            f"BONUS_FRESH_LEVEL: +10 (Niveau frais à {distance_pips:.1f} pips)"
+                        )
+                        break
+        except Exception:
+            pass
+
+    # BONUS 3: Trend Consistency (+5 pts)
+    if memory_clarity >= 0.7 and memory_trend_strength >= 0.6:
+        if (memory_trend_direction == "BULLISH" and signal_action == "BUY") or \
+           (memory_trend_direction == "BEARISH" and signal_action == "SELL"):
+            pma_bonus += 5.0
+            pma_adjustments.append(
+                f"BONUS_TREND_CONSISTENCY: +5 (Clarity={memory_clarity:.2f}, Strength={memory_trend_strength:.2f})"
+            )
+
+    # BONUS 4: Institutional Reversal Signal (+10 pts)
+    if inst_result is not None and inst_score >= 65:
+        inst_trend = inst_result.get('new_trend', 'NEUTRAL')
+        if (inst_trend == "BULLISH" and signal_action == "BUY") or \
+           (inst_trend == "BEARISH" and signal_action == "SELL"):
+            pma_bonus += 10.0
+            pma_adjustments.append(
+                f"BONUS_INSTITUTIONAL: +10 (Score={inst_score:.0f}, Trend={inst_trend})"
+            )
+        elif inst_result.get('reversal_detected', False):
+            _inst_veto_reversal = True
+            pma_adjustments.append(
+                f"🚫 VETO_REVERSAL: Reversal {inst_trend} vs Signal {signal_action} (Score={inst_score:.0f})"
+            )
+            if logger_ref:
+                logger_ref.warning(
+                    f"🚫 [VETO_REVERSAL][{asset}] Trade BLOQUÉ | "
+                    f"Reversal {inst_trend} détecté vs Signal {signal_action} | "
+                    f"Score institutionnel: {inst_score:.0f}"
+                )
+
+    # ══════════════════════════════════════════════════════
+    # 🧮 CALCUL DU SCORE AJUSTÉ
+    # ══════════════════════════════════════════════════════
+    score_brut = orderflow_score
+    pma_adjustment_total = pma_bonus - pma_malus
+    score_ajuste = score_brut + pma_adjustment_total
+
+    # ══════════════════════════════════════════════════════
+    # 🚫 RÈGLE DU VETO DUR (score ajusté < 60 → rejeté)
+    # ══════════════════════════════════════════════════════
+    VETO_DUR_THRESHOLD = 60.0
+    if signal_action in ["BUY", "SELL"] and score_ajuste < VETO_DUR_THRESHOLD:
+        pma_veto_dur = True
+
+    # LOG
+    if logger_ref and (pma_adjustment_total != 0 or pma_veto_dur or _inst_veto_reversal):
+        adj_emoji = "📈" if pma_adjustment_total > 0 else ("📉" if pma_adjustment_total < 0 else "⚖️")
+        veto_str = ""
+        if pma_veto_dur:
+            veto_str = " 🚫 VETO_DUR"
+        if _inst_veto_reversal:
+            veto_str = " 🚫 VETO_REVERSAL"
+        logger_ref.info(
+            f"{adj_emoji} [PMA_ADJUSTMENT][{asset}] "
+            f"Score: {score_brut:.1f} → {score_ajuste:.1f} "
+            f"(Bonus: +{pma_bonus:.0f}, Malus: -{pma_malus:.0f}){veto_str}"
+        )
+        for adj in pma_adjustments:
+            logger_ref.debug(f"   └─ {adj}")
+
+    return {
+        "pma_bonus": pma_bonus,
+        "pma_malus": pma_malus,
+        "pma_adjustment": pma_adjustment_total,
+        "pma_adjustments": pma_adjustments,
+        "pma_veto_dur": pma_veto_dur,
+        "inst_veto_reversal": _inst_veto_reversal,
+        "score_brut": score_brut,
+        "score_ajuste": score_ajuste,
+    }
