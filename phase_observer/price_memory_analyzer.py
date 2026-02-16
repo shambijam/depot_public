@@ -955,56 +955,81 @@ class PriceMemoryAnalyzer:
         current_price: float
     ) -> MTFAnalysisResult:
         """
-        Analyse un seul timeframe et stocke dans l'historique
+        Analyse un seul timeframe via TENDANCE NETTE sur N bougies
+
+        16 FEV 2026: CORRECTION CRITIQUE — l'ancienne version regardait
+        1 seule bougie (LOOKBACK_CANDLES=1), ce qui confondait un pullback
+        de 4 bougies rouges avec un retournement bearish.
+
+        Maintenant: direction = mouvement net sur N bougies fermées.
+        4 bougies rouges dans une tendance bullish = toujours BULLISH
+        si le net reste positif.
 
         Args:
-            asset: Symbole (NAS100, EURUSD, etc.)
-            timeframe: M15, M5, ou M1
-            candles: DataFrame OHLCV pour ce timeframe
+            asset: Symbole
+            timeframe: M30, M15, M5, M1
+            candles: DataFrame OHLCV
             current_price: Prix actuel
 
         Returns:
-            MTFAnalysisResult avec direction et métriques
+            MTFAnalysisResult avec direction basée sur tendance nette
         """
         self._init_asset_history(asset)
 
-        LOOKBACK_CANDLES = 1  # 1 bougie = réactivité scalping
+        # Lookback par timeframe : mouvement net sur N bougies FERMÉES
+        # M30: 3 bougies = 1h30 de contexte macro
+        # M15: 4 bougies = 1h de direction confirmée
+        # M5:  5 bougies = 25min de momentum
+        # M1:  5 bougies = 5min de micro-tendance
+        LOOKBACK_MAP = {'M30': 3, 'M15': 4, 'M5': 5, 'M1': 5}
+        lookback = LOOKBACK_MAP.get(timeframe, 5)
 
-        if candles is None or len(candles) < 1:
+        if candles is None or len(candles) < 2:
             direction = 'NEUTRAL'
             net_pips = 0.0
             trend_clarity = 0.0
             if self.logger:
                 self.logger.warning(f"[MTF][{asset}][{timeframe}] PAS DE DONNÉES!")
         else:
-            # Dernière bougie uniquement (réactivité scalping)
-            last_candle = candles.iloc[-1]
-            candle_open = float(last_candle['open'])
-            candle_close = float(last_candle['close'])
-            candle_high = float(last_candle['high'])
-            candle_low = float(last_candle['low'])
-
             point = self._get_point_size(asset)
-            net_pips = (candle_close - candle_open) / point
 
-            if candle_close < candle_open:
-                direction = 'BEARISH'
-            elif candle_close > candle_open:
-                direction = 'BULLISH'
-            else:
+            # Bougies fermées = tout sauf la dernière (en cours)
+            closed = candles.iloc[:-1]
+            if len(closed) < 1:
                 direction = 'NEUTRAL'
+                net_pips = 0.0
+                trend_clarity = 0.0
+            else:
+                # Prendre les N dernières bougies fermées
+                window = closed.iloc[-lookback:] if len(closed) >= lookback else closed
+
+                # Mouvement net = close de la dernière fermée - open de la première du window
+                window_open = float(window.iloc[0]['open'])
+                window_close = float(window.iloc[-1]['close'])
+                net_pips = (window_close - window_open) / point
+
+                # Direction basée sur le mouvement net
+                # Seuil minimum : 1 pip pour éviter le bruit
+                MIN_NET_PIPS = 1.0
+                if net_pips > MIN_NET_PIPS:
+                    direction = 'BULLISH'
+                elif net_pips < -MIN_NET_PIPS:
+                    direction = 'BEARISH'
+                else:
+                    direction = 'NEUTRAL'
+
+                # Trend clarity : ratio mouvement net / range total du window
+                total_range = float(window['high'].max()) - float(window['low'].min())
+                net_move = abs(window_close - window_open)
+                trend_clarity = min(1.0, net_move / total_range) if total_range > 0 else 0.5
 
             if self.logger:
+                n_used = min(lookback, len(closed))
                 color = "🔴" if direction == 'BEARISH' else ("🟢" if direction == 'BULLISH' else "⚪")
                 self.logger.info(
                     f"[MTF_CANDLE][{asset}][{timeframe}] {color} "
-                    f"{net_pips:+.1f} pips | → {direction}"
+                    f"{net_pips:+.1f} pips ({n_used} bougies) | → {direction}"
                 )
-
-            # Trend clarity
-            candle_range = abs(candle_close - candle_open)
-            avg_range = (candles['high'] - candles['low']).mean() if len(candles) > 0 else 1.0
-            trend_clarity = min(1.0, candle_range / avg_range) if avg_range > 0 else 0.5
 
         # Créer résultat
         result = MTFAnalysisResult(
