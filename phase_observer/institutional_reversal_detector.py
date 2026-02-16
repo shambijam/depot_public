@@ -90,11 +90,12 @@ class InstitutionalReversalDetector:
                 "institutional_validation": True
             },
             "signals": {
-                # Poids NETTOYÉS (25 JAN 2026) - 4 couches core = 100%
-                "changepoint_weight": 0.35,      # Changepoint (statistique) - CRITIQUE
-                "divergence_weight": 0.30,       # Divergence Multi-TF (M1+M5)
+                # Poids REDISTRIBUÉS (16 FEV 2026) - 4 couches core + CVD Flows
+                "changepoint_weight": 0.20,      # Changepoint (statistique)
+                "divergence_weight": 0.35,       # Divergence Multi-TF (M1+M5) - CRITIQUE
                 "accumulation_weight": 0.25,     # Smart Money Wyckoff - CŒUR IRD
-                "pattern_weight": 0.10,          # ML Pattern Recognition
+                "pattern_weight": 0.20,          # ML Pattern Recognition (augmenté)
+                "capital_flows_weight": 0.10,    # CVD Capital Flows (intégré au scoring)
                 # DÉSACTIVÉS (géré par PMA/MPA):
                 # "fatigue_weight": 0.0,         # → VETO seulement
                 # "microstructure_m1_weight": 0.0, # → PMA
@@ -145,7 +146,7 @@ class InstitutionalReversalDetector:
             "institutional_score": institutional_score,
             "conviction_level": result["conviction_level"],
             "new_trend": self._determine_new_trend(result),
-            "reversal_detected": institutional_score >= 75,
+            "reversal_detected": institutional_score >= 65,
 
             # === DÉTAILS ANALYSE ===
             "regime_change": result["regime_change"],
@@ -469,14 +470,14 @@ class InstitutionalReversalDetector:
 
     def _check_hidden_divergence_impl(self, price_highs, price_lows, cvd_segment):
         """Divergence cachée (continuation)"""
-        # Hidden bullish : Prix fait HH, CVD fait LH
-        if len(price_highs) >= 3 and len(cvd_segment) >= 3:
-            if (price_highs[-1] > price_highs[-3] and cvd_segment[-1] < cvd_segment[-3]):
+        # Hidden bullish : Prix fait HL (Higher Low), CVD fait LL (Lower Low)
+        if len(price_lows) >= 3 and len(cvd_segment) >= 3:
+            if (price_lows[-1] > price_lows[-3] and cvd_segment[-1] < cvd_segment[-3]):
                 return {"detected": True, "direction": "BULLISH", "type": "HIDDEN_BULLISH"}
 
-        # Hidden bearish : Prix fait LL, CVD fait HL
-        if len(price_lows) >= 3 and len(cvd_segment) >= 3:
-            if (price_lows[-1] < price_lows[-3] and cvd_segment[-1] > cvd_segment[-3]):
+        # Hidden bearish : Prix fait LH (Lower High), CVD fait HH (Higher High)
+        if len(price_highs) >= 3 and len(cvd_segment) >= 3:
+            if (price_highs[-1] < price_highs[-3] and cvd_segment[-1] > cvd_segment[-3]):
                 return {"detected": True, "direction": "BEARISH", "type": "HIDDEN_BEARISH"}
 
         return {"detected": False, "direction": "NEUTRAL", "type": "NONE"}
@@ -1664,8 +1665,10 @@ class InstitutionalReversalDetector:
                 weight_key = "microstructure_m1_weight"
             elif "PATTERN" in signal.name or "ML" in signal.name:
                 weight_key = "pattern_weight"
+            elif "CAPITAL_FLOWS" in signal.name or "CVD" in signal.name:
+                weight_key = "capital_flows_weight"
             else:
-                # Bonus layers (confluence, flows) - pas de poids fixe, boost les autres
+                # Bonus layers (confluence) - pas de poids fixe, boost les autres
                 continue
 
             if weight_key and weight_key in weights:
@@ -1834,8 +1837,8 @@ class InstitutionalReversalDetector:
         except Exception:
             validation_methods.append("CVD_ERROR")
 
-        # Validation: au moins 2/3 critères doivent être satisfaits
-        validated = criteria_met >= 2
+        # Validation: au moins 1/3 critères doivent être satisfaits
+        validated = criteria_met >= 1
         confidence = criteria_met / 3.0
 
         return {

@@ -14,6 +14,7 @@ from pathlib import Path
 from core.utils import ConfigValidationError, TradeStatus
 from strategy.scalping import ScalpingStrategy
 from phase_observer.market_analyzer import MarketAnalyzer
+from strategy.advanced_scoring import calculate_final_score
 # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
 # detect_orderflow_v6 supprimé → analyse intégrée dans ScalpingStrategy
 # from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
@@ -844,6 +845,9 @@ class DecisionPipeline:
         latest: dict,
         ctx: dict,
         logger_ref=None,
+        # 16 FEV 2026: Ajout fatigue/physics pour scoring centralise
+        fatigue_result: dict = None,
+        physics_result: dict = None,
     ) -> dict:
         """
         Centralise TOUTE la logique de décision scalping (3 branches).
@@ -965,9 +969,8 @@ class DecisionPipeline:
             }
 
         # ════════════════════════════════════════════════════════════
-        # BUILD DECISION (commun B2 + B3)
+        # MIN_SCORE CONFIG (commun B2 + B3)
         # ════════════════════════════════════════════════════════════
-        # min_score par défaut: 65 pour override, 60 pour normal
         asset_min_score_default = 65.0 if is_override else 60.0
         asset_min_score_worker = asset_min_score_default
         try:
@@ -983,23 +986,30 @@ class DecisionPipeline:
         except Exception as e_min_score_worker:
             _log.warning(f"[CONFIG_WORKER][{asset}] Erreur lecture min_score: {e_min_score_worker}, using default={asset_min_score_default}")
 
-        try:
-            if self.market_analyzer:
-                decision_mini = self.market_analyzer.build_decision(
-                    orderflow_result=orderflow_result_mini,
-                    min_score=asset_min_score_worker
-                )
-            else:
-                decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
+        # ════════════════════════════════════════════════════════════
+        # BUILD DECISION (bias OF → action BUY/SELL/HOLD)
+        # ════════════════════════════════════════════════════════════
+        of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
+        if orderflow_score >= asset_min_score_worker and of_bias in ["BUY", "SELL"]:
+            decision_mini = {
+                "action": of_bias,
+                "confidence": orderflow_score / 100.0,
+                "anchor_price": orderflow_result_mini.get("summary", {}).get("vpoc_price"),
+                "rationale": f"OrderFlow {of_bias} score={orderflow_score:.1f}/100",
+            }
+        else:
+            decision_mini = {
+                "action": "HOLD",
+                "confidence": 0.0,
+                "anchor_price": None,
+                "rationale": f"OrderFlow insuffisant (score={orderflow_score:.1f}, bias={of_bias}, seuil={asset_min_score_worker})",
+            }
 
-            _log.info(
-                f"[DECISION][{asset}] action={decision_mini['action']} | "
-                f"confidence={decision_mini['confidence']:.2f} | "
-                f"rationale={decision_mini['rationale']}"
-            )
-        except Exception as e_decision:
-            _log.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
-            decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
+        _log.info(
+            f"[DECISION][{asset}] action={decision_mini['action']} | "
+            f"confidence={decision_mini['confidence']:.2f} | "
+            f"rationale={decision_mini['rationale']}"
+        )
 
         # ════════════════════════════════════════════════════════════
         # TRIPLE FILTRE (Branche 2 seulement)
@@ -1200,77 +1210,88 @@ class DecisionPipeline:
                 _log.error(f"[TRIPLE_FILTER][{asset}] Erreur: {e_triple_filter}", exc_info=True)
 
         # ════════════════════════════════════════════════════════════
-        # PMA ADJUSTMENTS (commun B2 + B3)
+        # SCORING CENTRALISE (16 FEV 2026 — remplace apply_pma_adjustments)
         # ════════════════════════════════════════════════════════════
-        pma_bonus = 0.0
-        pma_malus = 0.0
-        pma_adjustments = []
+        signal_action = decision_mini.get("action", "HOLD")
+        scoring_result = None
+        score_brut = orderflow_score
+        score_final = orderflow_score
         pma_veto_dur = False
 
         try:
-            signal_action = decision_mini.get("action", "HOLD")
-
-            pma_result = apply_pma_adjustments(
-                signal_action=signal_action,
+            scoring_result = calculate_final_score(
                 orderflow_score=orderflow_score,
-                mtf_verdict=mtf_verdict,
-                mtf_direction=mtf_direction,
-                micro_resistance_info=micro_resistance_info,
+                orderflow_bias=orderflow_result_mini.get("bias", "NEUTRAL"),
+                signal_action=signal_action,
+                fatigue_result=fatigue_result,
+                physics_result=physics_result,
                 inst_result=inst_result,
                 inst_score=inst_score,
-                inst_veto_fatigue=inst_veto_fatigue,
-                inst_veto_reversal=inst_veto_reversal,
-                current_regime=current_regime,
+                mtf_verdict=mtf_verdict,
+                mtf_direction=mtf_direction,
                 memory_clarity=memory_clarity,
                 memory_trend_strength=memory_trend_strength,
                 memory_trend_direction=memory_trend_direction,
+                micro_resistance_info=micro_resistance_info,
                 price_memory_analyzer=price_memory_analyzer,
                 rates_df_fresh=rates_df_fresh,
                 current_price=current_price,
+                current_regime=current_regime,
+                inst_veto_fatigue=inst_veto_fatigue,
                 asset=asset,
                 logger_ref=_log,
             )
 
-            pma_bonus = pma_result["pma_bonus"]
-            pma_malus = pma_result["pma_malus"]
-            pma_adjustments = pma_result["pma_adjustments"]
-            pma_veto_dur = pma_result["pma_veto_dur"]
-            inst_veto_reversal = pma_result["inst_veto_reversal"]
-            score_brut = pma_result["score_brut"]
-            score_ajuste = pma_result["score_ajuste"]
-            pma_adjustment_total = pma_result["pma_adjustment"]
+            score_brut = scoring_result["score_brut"]
+            score_final = scoring_result["score_final"]
+            pma_bonus = scoring_result["bonus_total"]
+            pma_malus = scoring_result["malus_total"]
+            pma_adjustments = scoring_result["adjustments"]
+            ird_reversal_opposed = scoring_result["ird_reversal_opposed"]
 
-            # Stocker dans orderflow_result_mini pour traçabilité
+            # Stocker dans orderflow_result_mini pour tracabilite
             orderflow_result_mini['pma_bonus'] = pma_bonus
             orderflow_result_mini['pma_malus'] = pma_malus
-            orderflow_result_mini['pma_adjustment'] = pma_adjustment_total
+            orderflow_result_mini['pma_adjustment'] = pma_bonus - pma_malus
             orderflow_result_mini['pma_adjustments'] = pma_adjustments
             orderflow_result_mini['score_before_pma'] = score_brut
-            orderflow_result_mini['score'] = score_ajuste
+            orderflow_result_mini['score'] = score_final
 
-            # Appliquer VETO DUR
-            if pma_veto_dur and signal_action in ["BUY", "SELL"]:
+            # VETO DUR: score ajuste < 60
+            VETO_DUR_THRESHOLD = 60.0
+            if signal_action in ["BUY", "SELL"] and score_final < VETO_DUR_THRESHOLD:
+                pma_veto_dur = True
                 old_action = decision_mini["action"]
                 decision_mini["action"] = "HOLD"
                 decision_mini["confidence"] = 0.0
                 decision_mini["rationale"] = (
-                    f"PMA_VETO_DUR: Score {score_ajuste:.1f} < 60 | "
+                    f"VETO_DUR: Score {score_final:.1f} < {VETO_DUR_THRESHOLD} | "
                     f"Brut={score_brut:.1f} + Bonus={pma_bonus:.0f} - Malus={pma_malus:.0f} | "
                     f"Original: {old_action}"
                 )
+                _log.warning(
+                    f"[VETO_DUR][{asset}] Score {score_final:.1f} < {VETO_DUR_THRESHOLD} -> HOLD"
+                )
 
-            # Appliquer VETO REVERSAL
-            if inst_veto_reversal and signal_action in ["BUY", "SELL"]:
+            # VETO REVERSAL
+            if ird_reversal_opposed and signal_action in ["BUY", "SELL"] and not pma_veto_dur:
                 old_action = decision_mini["action"]
                 decision_mini["action"] = "HOLD"
                 decision_mini["confidence"] = 0.0
                 decision_mini["rationale"] = (
-                    f"🚫 VETO_REVERSAL: Renversement institutionnel détecté | "
+                    f"VETO_REVERSAL: Renversement institutionnel oppose au signal | "
                     f"Original: {old_action}"
                 )
+                inst_veto_reversal = True
+                _log.warning(
+                    f"[VETO_REVERSAL][{asset}] IRD oppose au signal {old_action} -> HOLD"
+                )
 
-        except Exception as e_pma:
-            _log.error(f"[PMA_ADJUSTMENT][{asset}] Erreur: {e_pma}", exc_info=True)
+        except Exception as e_scoring:
+            _log.error(f"[SCORING][{asset}] Erreur: {e_scoring}", exc_info=True)
+            pma_adjustments = []
+            pma_bonus = 0.0
+            pma_malus = 0.0
 
         # ════════════════════════════════════════════════════════════
         # CONSTRUCTION fusion_out (commun B2 + B3)
@@ -1289,8 +1310,8 @@ class DecisionPipeline:
                 "price": anchor_price,
                 "context": ctx,
                 "price_memory": {
-                    "score_brut": orderflow_result_mini.get("score_before_pma", orderflow_result_mini["score"]),
-                    "score_ajuste": orderflow_result_mini["score"],
+                    "score_brut": score_brut,
+                    "score_ajuste": score_final,
                     "pma_bonus": pma_bonus,
                     "pma_malus": pma_malus,
                     "pma_adjustment": pma_bonus - pma_malus,
@@ -1304,7 +1325,8 @@ class DecisionPipeline:
                         "m5": mtf_verdict.m5_direction if mtf_verdict else "N/A",
                         "m1": mtf_verdict.m1_direction if mtf_verdict else "N/A"
                     },
-                    "micro_resistance": micro_resistance_info
+                    "micro_resistance": micro_resistance_info,
+                    "scoring_components": scoring_result["components"] if scoring_result else {}
                 },
                 "institutional": {
                     "score": inst_score,
@@ -1317,9 +1339,9 @@ class DecisionPipeline:
             }
 
             _log.info(
-                f"🎯 [MINIMALIST][{asset}] ✅ {fusion_out['action']} | "
+                f"[MINIMALIST][{asset}] {fusion_out['action']} | "
                 f"confidence={fusion_out['fused_confidence']:.2f} | "
-                f"Score: {orderflow_result_mini.get('score_before_pma', orderflow_result_mini['score']):.1f} → {orderflow_result_mini['score']:.1f}"
+                f"Score: {score_brut:.1f} -> {score_final:.1f}"
             )
         else:
             fusion_out = {
@@ -2860,193 +2882,6 @@ class DecisionPipeline:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🧠 15 FEV 2026: APPLY PMA ADJUSTMENTS — Migré depuis run_bot.py
-# Fonction pure (module-level) — calcule Bonus/Malus/Veto PMA
+# 16 FEV 2026: apply_pma_adjustments() SUPPRIMEE
+# Scoring migre dans strategy/advanced_scoring.py → calculate_final_score()
 # ═══════════════════════════════════════════════════════════════════════════
-
-def apply_pma_adjustments(
-    signal_action: str,
-    orderflow_score: float,
-    mtf_verdict,
-    mtf_direction: str,
-    micro_resistance_info: dict,
-    inst_result: dict,
-    inst_score: float,
-    inst_veto_fatigue: bool,
-    inst_veto_reversal: bool,
-    current_regime: str,
-    memory_clarity: float,
-    memory_trend_strength: float,
-    memory_trend_direction: str,
-    price_memory_analyzer,
-    rates_df_fresh,
-    current_price: float,
-    asset: str,
-    logger_ref=None,
-) -> dict:
-    """
-    Calcule les ajustements PMA (Bonus/Malus) et les vetos.
-    Retourne un dict avec toutes les infos d'ajustement.
-
-    Returns:
-        {
-            "pma_bonus": float,
-            "pma_malus": float,
-            "pma_adjustment": float,
-            "pma_adjustments": list[str],
-            "pma_veto_dur": bool,
-            "inst_veto_reversal": bool,
-            "score_brut": float,
-            "score_ajuste": float,
-        }
-    """
-    pma_bonus = 0.0
-    pma_malus = 0.0
-    pma_adjustments = []
-    pma_veto_dur = False
-    _inst_veto_reversal = inst_veto_reversal  # copie locale modifiable
-
-    # ══════════════════════════════════════════════════════
-    # 📉 CALCUL DES MALUS (Risque & Veto)
-    # ══════════════════════════════════════════════════════
-
-    # MALUS 1: Micro-Résistance M1 (-30 pts)
-    if (signal_action == "BUY" and
-        micro_resistance_info.get('strength') in ['STRONG', 'MODERATE'] and
-        micro_resistance_info.get('distance_pips', 999) < 1.0 and
-        micro_resistance_info.get('bounce_probability', 0) >= 0.7):
-        pma_malus += 30.0
-        pma_adjustments.append(
-            f"MALUS_MICRO_RES: -30 (Résistance {micro_resistance_info['strength']} à {micro_resistance_info['distance_pips']:.2f} pips)"
-        )
-
-    # MALUS 2: Contre-Tendance MTF → SUPPRIMÉ 10 FEV 2026
-    # La stratégie (scalping.py) applique désormais le VETO MTF AVANT le bias.
-
-    # MALUS 3: Zone Range/Accumulation (-20 pts)
-    current_regime_lower = str(current_regime).lower() if current_regime else "unknown"
-    if any(rg in current_regime_lower for rg in ["range", "accumulation", "distribution"]):
-        if signal_action in ["BUY", "SELL"]:
-            pma_malus += 20.0
-            pma_adjustments.append(
-                f"MALUS_REGIME: -20 (Régime '{current_regime}' incompatible avec {signal_action})"
-            )
-
-    # MALUS 4: VETO FATIGUE (Circuit Breaker) (-50 pts)
-    if inst_veto_fatigue:
-        pma_malus += 50.0
-        pma_adjustments.append(
-            f"MALUS_FATIGUE: -50 (Circuit Breaker - Marché épuisé)"
-        )
-
-    # ══════════════════════════════════════════════════════
-    # 📈 CALCUL DES BONUS (Validation & Alignement)
-    # ══════════════════════════════════════════════════════
-
-    # BONUS 1: MTF Alignment 4/4 (+15 pts)
-    if mtf_verdict is not None and mtf_verdict.alignment_count == 4:
-        if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
-           (mtf_direction == "BEARISH" and signal_action == "SELL"):
-            pma_bonus += 15.0
-            pma_adjustments.append(
-                f"BONUS_MTF_4/4: +15 (Alignement parfait {mtf_direction} + {signal_action})"
-            )
-    # BONUS 1b: MTF Alignment 3/4 (+10 pts)
-    elif mtf_verdict is not None and mtf_verdict.alignment_count == 3:
-        if (mtf_direction == "BULLISH" and signal_action == "BUY") or \
-           (mtf_direction == "BEARISH" and signal_action == "SELL"):
-            pma_bonus += 10.0
-            pma_adjustments.append(
-                f"BONUS_MTF_3/4: +10 (Alignement {mtf_verdict.alignment} {mtf_direction} + {signal_action})"
-            )
-
-    # BONUS 2: Niveaux Frais (+10 pts)
-    if price_memory_analyzer is not None:
-        try:
-            fresh_levels = price_memory_analyzer.find_fresh_levels(
-                historical_data=rates_df_fresh,
-                current_price=current_price,
-                lookback=20
-            )
-            if fresh_levels and len(fresh_levels) > 0:
-                for level in fresh_levels:
-                    distance_pips = abs(current_price - level) * 10000
-                    if distance_pips < 2.0:
-                        pma_bonus += 10.0
-                        pma_adjustments.append(
-                            f"BONUS_FRESH_LEVEL: +10 (Niveau frais à {distance_pips:.1f} pips)"
-                        )
-                        break
-        except Exception:
-            pass
-
-    # BONUS 3: Trend Consistency (+5 pts)
-    if memory_clarity >= 0.7 and memory_trend_strength >= 0.6:
-        if (memory_trend_direction == "BULLISH" and signal_action == "BUY") or \
-           (memory_trend_direction == "BEARISH" and signal_action == "SELL"):
-            pma_bonus += 5.0
-            pma_adjustments.append(
-                f"BONUS_TREND_CONSISTENCY: +5 (Clarity={memory_clarity:.2f}, Strength={memory_trend_strength:.2f})"
-            )
-
-    # BONUS 4: Institutional Reversal Signal (+10 pts)
-    if inst_result is not None and inst_score >= 65:
-        inst_trend = inst_result.get('new_trend', 'NEUTRAL')
-        if (inst_trend == "BULLISH" and signal_action == "BUY") or \
-           (inst_trend == "BEARISH" and signal_action == "SELL"):
-            pma_bonus += 10.0
-            pma_adjustments.append(
-                f"BONUS_INSTITUTIONAL: +10 (Score={inst_score:.0f}, Trend={inst_trend})"
-            )
-        elif inst_result.get('reversal_detected', False):
-            _inst_veto_reversal = True
-            pma_adjustments.append(
-                f"🚫 VETO_REVERSAL: Reversal {inst_trend} vs Signal {signal_action} (Score={inst_score:.0f})"
-            )
-            if logger_ref:
-                logger_ref.warning(
-                    f"🚫 [VETO_REVERSAL][{asset}] Trade BLOQUÉ | "
-                    f"Reversal {inst_trend} détecté vs Signal {signal_action} | "
-                    f"Score institutionnel: {inst_score:.0f}"
-                )
-
-    # ══════════════════════════════════════════════════════
-    # 🧮 CALCUL DU SCORE AJUSTÉ
-    # ══════════════════════════════════════════════════════
-    score_brut = orderflow_score
-    pma_adjustment_total = pma_bonus - pma_malus
-    score_ajuste = score_brut + pma_adjustment_total
-
-    # ══════════════════════════════════════════════════════
-    # 🚫 RÈGLE DU VETO DUR (score ajusté < 60 → rejeté)
-    # ══════════════════════════════════════════════════════
-    VETO_DUR_THRESHOLD = 60.0
-    if signal_action in ["BUY", "SELL"] and score_ajuste < VETO_DUR_THRESHOLD:
-        pma_veto_dur = True
-
-    # LOG
-    if logger_ref and (pma_adjustment_total != 0 or pma_veto_dur or _inst_veto_reversal):
-        adj_emoji = "📈" if pma_adjustment_total > 0 else ("📉" if pma_adjustment_total < 0 else "⚖️")
-        veto_str = ""
-        if pma_veto_dur:
-            veto_str = " 🚫 VETO_DUR"
-        if _inst_veto_reversal:
-            veto_str = " 🚫 VETO_REVERSAL"
-        logger_ref.info(
-            f"{adj_emoji} [PMA_ADJUSTMENT][{asset}] "
-            f"Score: {score_brut:.1f} → {score_ajuste:.1f} "
-            f"(Bonus: +{pma_bonus:.0f}, Malus: -{pma_malus:.0f}){veto_str}"
-        )
-        for adj in pma_adjustments:
-            logger_ref.debug(f"   └─ {adj}")
-
-    return {
-        "pma_bonus": pma_bonus,
-        "pma_malus": pma_malus,
-        "pma_adjustment": pma_adjustment_total,
-        "pma_adjustments": pma_adjustments,
-        "pma_veto_dur": pma_veto_dur,
-        "inst_veto_reversal": _inst_veto_reversal,
-        "score_brut": score_brut,
-        "score_ajuste": score_ajuste,
-    }

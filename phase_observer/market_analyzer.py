@@ -42,60 +42,9 @@ class MarketAnalyzer:
 
         self._last_results: Dict[str, Any] = {}
 
-    # ============================================================
-    # 🎯 DÉCISION DIRECTE - OrderFlow V6 seul (25 DEC 2025)
-    # ============================================================
-    def build_decision(
-        self,
-        orderflow_result: Dict[str, Any],
-        min_score: float = 75.0
-    ) -> Dict[str, Any]:
-        """
-        🎯 Décision directe basée sur OrderFlow V6 uniquement
-
-        Args:
-            orderflow_result: Résultat de OrderFlowV6.analyze()
-                {
-                    "score": 0-100,
-                    "bias": "BUY"|"SELL"|"NEUTRAL",
-                    "summary": {"vpoc_price": float, ...},
-                    ...
-                }
-            min_score: Seuil minimum pour trader (défaut 75)
-
-        Returns:
-            {
-                "action": "BUY" | "SELL" | "HOLD",
-                "confidence": float (0-1),
-                "anchor_price": float | None,
-                "rationale": str,
-                "orderflow_score": float
-            }
-        """
-        score = orderflow_result.get("score", 0)
-        bias = orderflow_result.get("bias", "NEUTRAL")
-        summary = orderflow_result.get("summary", {})
-
-        # Anchor price depuis VPOC
-        anchor_price = summary.get("vpoc_price")
-
-        # Décision simple
-        if score >= min_score and bias in ["BUY", "SELL"]:
-            return {
-                "action": bias,
-                "confidence": score / 100.0,
-                "anchor_price": anchor_price,
-                "rationale": f"OrderFlow {bias} score={score:.1f}/100",
-                "orderflow_score": score
-            }
-        else:
-            return {
-                "action": "HOLD",
-                "confidence": 0.0,
-                "anchor_price": None,
-                "rationale": f"OrderFlow insuffisant (score={score:.1f}, bias={bias}, seuil={min_score})",
-                "orderflow_score": score
-            }
+    # 16 FEV 2026: build_decision() SUPPRIMEE
+    # Decision integree dans decision_pipeline.decide_scalp_action()
+    # Scoring centralise dans advanced_scoring.calculate_final_score()
 
     # ============================================================
     # 📊 ANALYSE PRINCIPALE - PhaseObserver + PassThrough

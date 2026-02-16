@@ -1,21 +1,18 @@
 """
-UnifiedScorer - Systeme de scoring unifie
+Advanced Scoring - Module de scoring centralise (16 FEV 2026)
 
-Fusion de 3 systemes en 1 (24 Janvier 2026):
-- calculate_score_integrated (OrderFlow V6)
-- calculate_composite_score (multi-dimensionnel)
-- _score_candidate (contexte + risque)
+RESPONSABILITE UNIQUE: Calcul du score final (bonus/malus).
+PAS de decision BUY/SELL/HOLD — ca reste dans decision_pipeline.py.
+PAS de vetos — ca reste dans decision_pipeline.py.
 
-Architecture finale:
-- OrderFlow (35%): Delta, Volume, Imbalance, Footprint
-- Institutional (25%): 5 analyseurs (Memory, Fatigue, Physics, Tape, Pressure)
-- Context (20%): Phase, Alignment, Confidence
-- Technical (15%): Setup score, Patterns
-- Risk (5%): Spread, Volatility
+Absorbe les bonus/malus de l'ancien apply_pma_adjustments() +
+integre fatigue, physics, IRD qui etaient deconnectes.
+
+Fonction principale: calculate_final_score()
+Fonction legacy:     calculate_score_integrated() (pour orderflow_v6.py)
 """
 
 import logging
-import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
 
@@ -23,162 +20,421 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# FONCTION UNIFIEE DE SCORING (24 Jan 2026)
+# FONCTION PRINCIPALE — SCORING CENTRALISE (16 FEV 2026)
 # ============================================================================
 
-def calculate_unified_score(
-    # OrderFlow params
-    metrics: Optional[Dict[str, float]] = None,
-    patterns: Optional[Dict[str, Any]] = None,
-    footprint_data: Optional[Dict[str, Any]] = None,
-    current_regime: Optional[str] = None,
-    rescue_level: int = 0,
-    # Data params
-    ticks_df: Optional[pd.DataFrame] = None,
-    candles_df: Optional[pd.DataFrame] = None,
-    # Institutional params
-    institutional_analysis: Optional[Dict[str, Any]] = None,
-    # Candidate params
-    candidate: Optional[Dict[str, Any]] = None,
-    meta: Optional[Dict[str, Any]] = None,
-    asset_signals: Optional[Dict[str, Any]] = None,
-    # Weights (optionnel)
-    weights: Optional[Dict[str, float]] = None,
-) -> Dict[str, Any]:
+def calculate_final_score(
+    # OrderFlow brut
+    orderflow_score: float,
+    orderflow_bias: str,
+    signal_action: str,
+    # Les 3 analyseurs
+    fatigue_result: dict,
+    physics_result: dict,
+    inst_result: dict,
+    inst_score: float,
+    # MTF
+    mtf_verdict,
+    mtf_direction: str,
+    # PMA (Price Memory)
+    memory_clarity: float,
+    memory_trend_strength: float,
+    memory_trend_direction: str,
+    micro_resistance_info: dict,
+    price_memory_analyzer,
+    rates_df_fresh,
+    current_price: float,
+    # Context
+    current_regime: str,
+    inst_veto_fatigue: bool,
+    # Meta
+    asset: str,
+    logger_ref=None,
+) -> dict:
     """
-    Fonction de scoring unifiee - combine OrderFlow + Composite + Candidate.
+    Calcule le score final en centralisant TOUS les bonus/malus.
 
-    Args:
-        metrics: Metriques OrderFlow (delta_total, total_volume, imbalance_mean, etc.)
-        patterns: Patterns detectes
-        footprint_data: Donnees footprint (buy_volume, sell_volume, etc.)
-        current_regime: "trending", "consolidation", "range"
-        rescue_level: Niveau de rescue (0=normal, 1=soft, 2+=hard)
-        ticks_df: DataFrame des ticks
-        candles_df: DataFrame M1
-        institutional_analysis: Resultats des 5 analyseurs
-        candidate: Candidat d'entree (action, technical_score, etc.)
-        meta: Metadata (spread_pips, etc.)
-        asset_signals: Signaux de l'asset (phase, confidence_score, etc.)
-        weights: Poids custom
+    NE prend PAS de decision BUY/SELL/HOLD (decision_pipeline s'en charge).
+    NE gere PAS les vetos (decision_pipeline s'en charge).
 
     Returns:
         {
-            'final_score': float (0-100),
-            'normalized_score': float (0-1),
-            'status': str (VALID/SUSPECT),
-            'decision': str (BUY/SELL/HOLD),
-            'confidence': str (STRONG/GOOD/WEAK/NONE),
-            'components': {orderflow, institutional, context, technical, risk},
-            'details': {...}
+            "score_brut": float,
+            "score_final": float,
+            "bonus_total": float,
+            "malus_total": float,
+            "adjustments": list[str],
+            "ird_reversal_opposed": bool,
+            "components": {
+                "orderflow": float,
+                "fatigue_state": str,
+                "fatigue_impact": float,
+                "physics_bias": str,
+                "physics_impact": float,
+                "ird_score": float,
+                "ird_impact": float,
+                "mtf_impact": float,
+                "regime_impact": float,
+                "micro_res_impact": float,
+                "consensus": str,
+            }
         }
     """
-    # Defaults
+    _log = logger_ref or logger
+
+    fatigue_result = fatigue_result or {}
+    physics_result = physics_result or {}
+    inst_result = inst_result or {}
+    micro_resistance_info = micro_resistance_info or {}
+
+    score_brut = orderflow_score
+    bonus_total = 0.0
+    malus_total = 0.0
+    adjustments = []
+    ird_reversal_opposed = False
+
+    # Composants tracabilite
+    fatigue_impact = 0.0
+    physics_impact = 0.0
+    ird_impact = 0.0
+    mtf_impact = 0.0
+    regime_impact = 0.0
+    micro_res_impact = 0.0
+
+    # ══════════════════════════════════════════════════════
+    # 1. SCORE DE BASE = orderflow_score
+    # ══════════════════════════════════════════════════════
+
+    # ══════════════════════════════════════════════════════
+    # 2. MALUS FATIGUE (NOUVEAU — auparavant deconnecte)
+    # ══════════════════════════════════════════════════════
+    fatigue_state = str(fatigue_result.get('market_state', 'UNKNOWN')).upper()
+
+    if fatigue_state == 'EXHAUSTED':
+        fatigue_impact = -25.0
+        malus_total += 25.0
+        adjustments.append(f"MALUS_FATIGUE_EXHAUSTED: -25 (marche epuise)")
+    elif fatigue_state == 'FATIGUED':
+        fatigue_impact = -15.0
+        malus_total += 15.0
+        adjustments.append(f"MALUS_FATIGUE: -15 (marche fatigue)")
+
+    # Fatigue directionnelle supplementaire
+    buyer_fatigue = fatigue_result.get('buyer_fatigue', {})
+    seller_fatigue = fatigue_result.get('seller_fatigue', {})
+    if buyer_fatigue.get('fatigue_level') == 'HIGH' and signal_action == 'BUY':
+        fatigue_impact -= 10.0
+        malus_total += 10.0
+        adjustments.append("MALUS_BUYER_FATIGUE: -10 (acheteurs epuises + signal BUY)")
+    if seller_fatigue.get('fatigue_level') == 'HIGH' and signal_action == 'SELL':
+        fatigue_impact -= 10.0
+        malus_total += 10.0
+        adjustments.append("MALUS_SELLER_FATIGUE: -10 (vendeurs epuises + signal SELL)")
+
+    # ══════════════════════════════════════════════════════
+    # 3. MALUS PHYSICS (NOUVEAU — auparavant deconnecte)
+    # ══════════════════════════════════════════════════════
+    physics_bias = str(physics_result.get('physics_bias', 'NEUTRAL')).upper()
+    energy = physics_result.get('energy_conservation', {})
+    entropy = physics_result.get('market_entropy', {})
+    inertia = physics_result.get('price_inertia', {})
+    barriers = physics_result.get('energy_barriers', {})
+
+    if energy.get('energy_deficit'):
+        physics_impact -= 20.0
+        malus_total += 20.0
+        adjustments.append("MALUS_PHYSICS_DEFICIT: -20 (energie insuffisante)")
+
+    entropy_state = str(entropy.get('market_state', '')).upper()
+    if entropy_state == 'CHAOTIC':
+        physics_impact -= 15.0
+        malus_total += 15.0
+        adjustments.append("MALUS_PHYSICS_CHAOS: -15 (entropie chaotique)")
+
+    # Barriere proche dans la direction du trade
+    if signal_action == 'BUY' and barriers.get('distance_to_resistance_pct', 999) < 0.001:
+        physics_impact -= 10.0
+        malus_total += 10.0
+        adjustments.append("MALUS_BARRIER_UP: -10 (resistance < 1 pip)")
+    elif signal_action == 'SELL' and barriers.get('distance_to_support_pct', 999) < 0.001:
+        physics_impact -= 10.0
+        malus_total += 10.0
+        adjustments.append("MALUS_BARRIER_DOWN: -10 (support < 1 pip)")
+
+    # ══════════════════════════════════════════════════════
+    # 4. BONUS PHYSICS (NOUVEAU)
+    # ══════════════════════════════════════════════════════
+    if inertia.get('likely_to_continue'):
+        inertia_dir = inertia.get('direction', 'NEUTRAL')
+        if (inertia_dir == 'UP' and signal_action == 'BUY') or \
+           (inertia_dir == 'DOWN' and signal_action == 'SELL'):
+            physics_impact += 10.0
+            bonus_total += 10.0
+            adjustments.append(f"BONUS_PHYSICS_INERTIE: +10 (inertie {inertia_dir} alignee)")
+
+    # ══════════════════════════════════════════════════════
+    # 5. BONUS/FLAG IRD (augmente — avant +10)
+    # ══════════════════════════════════════════════════════
+    if inst_result and inst_score > 0:
+        inst_trend = inst_result.get('new_trend', 'NEUTRAL')
+        trend_aligned = (
+            (inst_trend == "BULLISH" and signal_action == "BUY") or
+            (inst_trend == "BEARISH" and signal_action == "SELL")
+        )
+        trend_opposed = (
+            (inst_trend == "BULLISH" and signal_action == "SELL") or
+            (inst_trend == "BEARISH" and signal_action == "BUY")
+        )
+
+        if trend_aligned:
+            if inst_score >= 80:
+                ird_impact = 25.0
+                bonus_total += 25.0
+                adjustments.append(f"BONUS_IRD_HIGH: +25 (Score={inst_score:.0f}, Trend={inst_trend} aligne)")
+            elif inst_score >= 65:
+                ird_impact = 15.0
+                bonus_total += 15.0
+                adjustments.append(f"BONUS_IRD: +15 (Score={inst_score:.0f}, Trend={inst_trend} aligne)")
+        elif trend_opposed and inst_result.get('reversal_detected', False):
+            ird_reversal_opposed = True
+            adjustments.append(
+                f"FLAG_IRD_REVERSAL: Reversal {inst_trend} OPPOSE au signal {signal_action} (Score={inst_score:.0f})"
+            )
+
+    # ══════════════════════════════════════════════════════
+    # 6. MALUS IRD FATIGUE (migre depuis PMA)
+    # ══════════════════════════════════════════════════════
+    if inst_veto_fatigue:
+        malus_total += 50.0
+        adjustments.append("MALUS_FATIGUE_CIRCUIT_BREAKER: -50 (marche epuise - IRD)")
+
+    # ══════════════════════════════════════════════════════
+    # 7. BONUS MTF (migre depuis PMA)
+    # ══════════════════════════════════════════════════════
+    if mtf_verdict is not None:
+        alignment_count = getattr(mtf_verdict, 'alignment_count', 0)
+        mtf_aligned = (
+            (mtf_direction == "BULLISH" and signal_action == "BUY") or
+            (mtf_direction == "BEARISH" and signal_action == "SELL")
+        )
+        if mtf_aligned:
+            if alignment_count == 4:
+                mtf_impact = 15.0
+                bonus_total += 15.0
+                adjustments.append(f"BONUS_MTF_4/4: +15 (alignement parfait {mtf_direction})")
+            elif alignment_count == 3:
+                mtf_impact = 10.0
+                bonus_total += 10.0
+                alignment_str = getattr(mtf_verdict, 'alignment', '3/4')
+                adjustments.append(f"BONUS_MTF_3/4: +10 (alignement {alignment_str} {mtf_direction})")
+
+    # ══════════════════════════════════════════════════════
+    # 8. BONUS FRESH LEVEL (migre depuis PMA)
+    # ══════════════════════════════════════════════════════
+    if price_memory_analyzer is not None:
+        try:
+            fresh_levels = price_memory_analyzer.find_fresh_levels(
+                historical_data=rates_df_fresh,
+                current_price=current_price,
+                lookback=20
+            )
+            if fresh_levels and len(fresh_levels) > 0:
+                for level in fresh_levels:
+                    distance_pips = abs(current_price - level) * 10000
+                    if distance_pips < 2.0:
+                        bonus_total += 10.0
+                        adjustments.append(f"BONUS_FRESH_LEVEL: +10 (niveau frais a {distance_pips:.1f} pips)")
+                        break
+        except Exception:
+            pass
+
+    # ══════════════════════════════════════════════════════
+    # 9. BONUS TREND CONSISTENCY (migre depuis PMA)
+    # ══════════════════════════════════════════════════════
+    if memory_clarity >= 0.7 and memory_trend_strength >= 0.6:
+        trend_aligned = (
+            (memory_trend_direction == "BULLISH" and signal_action == "BUY") or
+            (memory_trend_direction == "BEARISH" and signal_action == "SELL")
+        )
+        if trend_aligned:
+            bonus_total += 5.0
+            adjustments.append(
+                f"BONUS_TREND_CONSISTENCY: +5 (Clarity={memory_clarity:.2f}, Strength={memory_trend_strength:.2f})"
+            )
+
+    # ══════════════════════════════════════════════════════
+    # 10. MALUS MICRO-RESISTANCE (migre depuis PMA)
+    # ══════════════════════════════════════════════════════
+    if (signal_action == "BUY" and
+        micro_resistance_info.get('strength') in ['STRONG', 'MODERATE'] and
+        micro_resistance_info.get('distance_pips', 999) < 1.0 and
+        micro_resistance_info.get('bounce_probability', 0) >= 0.7):
+        micro_res_impact = -30.0
+        malus_total += 30.0
+        adjustments.append(
+            f"MALUS_MICRO_RES: -30 (Resistance {micro_resistance_info['strength']} a "
+            f"{micro_resistance_info['distance_pips']:.2f} pips)"
+        )
+
+    # ══════════════════════════════════════════════════════
+    # 11. MALUS REGIME (migre depuis PMA)
+    # ══════════════════════════════════════════════════════
+    current_regime_lower = str(current_regime).lower() if current_regime else "unknown"
+    regime_blocked = any(rg in current_regime_lower for rg in ["range", "accumulation", "distribution"])
+
+    if regime_blocked and signal_action in ["BUY", "SELL"]:
+        # EXCEPTION: IRD reversal detecte + conviction MODERATE+ → pas de malus regime
+        ird_exception = False
+        if inst_result and inst_result.get('reversal_detected', False):
+            conviction = inst_result.get('conviction_level', 'LOW')
+            if conviction in ['MODERATE', 'HIGH']:
+                ird_exception = True
+
+        if not ird_exception:
+            regime_impact = -20.0
+            malus_total += 20.0
+            adjustments.append(
+                f"MALUS_REGIME: -20 (Regime '{current_regime}' incompatible avec {signal_action})"
+            )
+        else:
+            adjustments.append(
+                f"REGIME_EXCEPTION: IRD reversal {inst_result.get('conviction_level', 'N/A')} → malus regime annule"
+            )
+
+    # ══════════════════════════════════════════════════════
+    # 12. CONSENSUS (NOUVEAU)
+    # ══════════════════════════════════════════════════════
+    stop_count = 0
+    go_count = 0
+
+    if fatigue_state == 'EXHAUSTED':
+        stop_count += 1
+    elif fatigue_state == 'ENERGETIC':
+        go_count += 1
+
+    if energy.get('energy_deficit') or entropy_state == 'CHAOTIC':
+        stop_count += 1
+    elif not energy.get('energy_deficit') and entropy_state == 'ORDERED':
+        go_count += 1
+
+    if ird_reversal_opposed:
+        stop_count += 1
+    elif ird_impact > 0:
+        go_count += 1
+
+    consensus = "SPLIT"
+    if stop_count >= 2:
+        consensus = "BLOCKED"
+        malus_total += 15.0
+        adjustments.append(f"MALUS_CONSENSUS_BLOCKED: -15 ({stop_count} analyseurs disent STOP)")
+    elif go_count >= 3:
+        consensus = "ALIGNED"
+        bonus_total += 15.0
+        adjustments.append(f"BONUS_CONSENSUS_ALIGNED: +15 ({go_count} analyseurs alignes)")
+
+    # ══════════════════════════════════════════════════════
+    # 13. CALCUL SCORE FINAL
+    # ══════════════════════════════════════════════════════
+    score_final = score_brut + bonus_total - malus_total
+    score_final = max(0.0, min(100.0, score_final))
+
+    # LOG
+    if adjustments:
+        adj_emoji = "+" if bonus_total > malus_total else ("-" if malus_total > bonus_total else "=")
+        _log.info(
+            f"[SCORING][{asset}] Score: {score_brut:.1f} -> {score_final:.1f} "
+            f"(Bonus: +{bonus_total:.0f}, Malus: -{malus_total:.0f}) [{adj_emoji}]"
+        )
+        for adj in adjustments:
+            _log.debug(f"   > {adj}")
+
+    return {
+        "score_brut": score_brut,
+        "score_final": score_final,
+        "bonus_total": bonus_total,
+        "malus_total": malus_total,
+        "adjustments": adjustments,
+        "ird_reversal_opposed": ird_reversal_opposed,
+        "components": {
+            "orderflow": score_brut,
+            "fatigue_state": fatigue_state,
+            "fatigue_impact": fatigue_impact,
+            "physics_bias": physics_bias,
+            "physics_impact": physics_impact,
+            "ird_score": inst_score,
+            "ird_impact": ird_impact,
+            "mtf_impact": mtf_impact,
+            "regime_impact": regime_impact,
+            "micro_res_impact": micro_res_impact,
+            "consensus": consensus,
+        }
+    }
+
+
+# ============================================================================
+# FONCTION LEGACY (compatibilite avec orderflow_v6.py)
+# ============================================================================
+
+def calculate_score_integrated(
+    metrics: Dict[str, float],
+    patterns,
+    rescue_level: int,
+    rescue_note: str,
+    footprint_data: Optional[Dict[str, Any]] = None,
+    scoring_weights: Optional[Dict[str, float]] = None,
+    current_regime: Optional[str] = None,
+) -> Tuple[float, str, Dict[str, Any]]:
+    """
+    Legacy wrapper pour compatibilite avec orderflow_v6.py.
+    Calcule le score OrderFlow pur (sans les bonus/malus des analyseurs).
+    """
     metrics = metrics or {}
-    patterns = patterns or {}
     footprint_data = footprint_data or {}
-    candidate = candidate or {}
-    meta = meta or {}
-    asset_signals = asset_signals or {}
 
-    # Poids par defaut
-    default_weights = {
-        'orderflow': 0.35,
-        'institutional': 0.25,
-        'context': 0.20,
-        'technical': 0.15,
-        'risk': 0.05
-    }
-    w = {**default_weights, **(weights or {})}
-
-    # Normaliser les poids
-    total_w = sum(w.values())
-    if total_w > 0:
-        w = {k: v/total_w for k, v in w.items()}
-
-    # ========================================================================
-    # 1. ORDERFLOW SCORE (0-100)
-    # ========================================================================
-    orderflow_score = _calculate_orderflow_component(
-        metrics, patterns, footprint_data, current_regime, rescue_level
+    # Calcul OrderFlow pur
+    of_score = _calculate_orderflow_component(
+        metrics,
+        patterns if isinstance(patterns, dict) else {},
+        footprint_data,
+        current_regime,
+        rescue_level,
     )
-
-    # ========================================================================
-    # 2. INSTITUTIONAL SCORE (0-100)
-    # ========================================================================
-    institutional_score = _calculate_institutional_component(
-        institutional_analysis, ticks_df, candles_df
-    )
-
-    # ========================================================================
-    # 3. CONTEXT SCORE (0-100)
-    # ========================================================================
-    context_score = _calculate_context_component(
-        candidate, asset_signals
-    )
-
-    # ========================================================================
-    # 4. TECHNICAL SCORE (0-100)
-    # ========================================================================
-    technical_score = _calculate_technical_component(
-        candidate, patterns
-    )
-
-    # ========================================================================
-    # 5. RISK SCORE (0-100)
-    # ========================================================================
-    risk_score = _calculate_risk_component(meta)
-
-    # ========================================================================
-    # SCORE FINAL
-    # ========================================================================
-    components = {
-        'orderflow': round(orderflow_score, 2),
-        'institutional': round(institutional_score, 2),
-        'context': round(context_score, 2),
-        'technical': round(technical_score, 2),
-        'risk': round(risk_score, 2)
-    }
-
-    final_score = (
-        w['orderflow'] * orderflow_score +
-        w['institutional'] * institutional_score +
-        w['context'] * context_score +
-        w['technical'] * technical_score +
-        w['risk'] * risk_score
-    )
-    final_score = max(0.0, min(100.0, final_score))
 
     # Status
     if rescue_level >= 2:
         status = "SUSPECT"
-    elif final_score >= 65:
+    elif of_score >= 65:
         status = "VALID"
-    elif final_score >= 50:
+    elif of_score >= 50:
         status = "MARGINAL"
     else:
         status = "SUSPECT"
 
-    # Decision et Confidence
-    decision, confidence = _determine_decision(final_score, components, candidate)
+    # Bias
+    if of_score >= 60:
+        bias = "BUY"
+    elif of_score <= 40:
+        bias = "SELL"
+    else:
+        bias = "HOLD"
 
-    return {
-        'final_score': round(final_score, 2),
-        'normalized_score': round(final_score / 100.0, 4),
-        'status': status,
-        'decision': decision,
-        'confidence': confidence,
-        'components': components,
-        'weights': w,
-        'details': {
-            'regime': current_regime or 'unknown',
-            'rescue_level': rescue_level,
-            'has_footprint': bool(footprint_data),
-            'has_ticks': ticks_df is not None,
-            'has_institutional': bool(institutional_analysis)
-        }
+    summary = {
+        "orderflow_score": of_score,
+        "final_score": of_score,
+        "status": status,
+        "components": {"orderflow": of_score},
+        "detected_regime": current_regime,
+        "rescue_level": rescue_level,
+        "rescue_kind": "none" if rescue_level == 0 else ("soft" if rescue_level == 1 else "hard"),
+        "bias": bias,
     }
 
+    return of_score, status, summary
+
+
+# ============================================================================
+# COMPOSANT ORDERFLOW (utilise par calculate_score_integrated)
+# ============================================================================
 
 def _calculate_orderflow_component(
     metrics: Dict[str, float],
@@ -189,14 +445,13 @@ def _calculate_orderflow_component(
 ) -> float:
     """Calcule le score OrderFlow (delta, volume, imbalance, footprint)."""
     if not metrics:
-        return 50.0  # Neutre si pas de donnees
+        return 50.0
 
-    # Helpers
     def _get_float(d, k, default=0.0):
         try:
             v = float(d.get(k, default))
             return v if np.isfinite(v) else default
-        except:
+        except Exception:
             return default
 
     delta_of = _get_float(metrics, "delta_total", 0.0)
@@ -276,289 +531,53 @@ def _calculate_orderflow_component(
     if total_vol < 50 and not fp_available:
         penalty += 5.0
 
-    # Total (max 90 avant penalty)
     score = delta_pts + volume_pts + imbalance_pts + footprint_pts + pattern_pts - penalty
     return max(0.0, min(100.0, score))
 
 
-def _calculate_institutional_component(
-    institutional_analysis: Optional[Dict[str, Any]],
-    ticks_df: Optional[pd.DataFrame],
-    candles_df: Optional[pd.DataFrame]
-) -> float:
-    """Calcule le score Institutional (5 analyseurs + microstructure)."""
-    if not institutional_analysis and ticks_df is None:
-        return 50.0  # Neutre
+# ============================================================================
+# FONCTION LEGACY — scoring candidat (utilisee par scalping.py _score_candidate)
+# ============================================================================
 
-    scores = []
+def calculate_unified_score(
+    candidate: Optional[Dict[str, Any]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    asset_signals: Optional[Dict[str, Any]] = None,
+    weights: Optional[Dict[str, float]] = None,
+    **_kwargs,
+) -> Dict[str, Any]:
+    """
+    Scoring simplifie pour candidats (legacy — utilise par scalping.py).
+    Retourne un normalized_score 0-1 base sur confidence + alignment.
+    """
+    candidate = candidate or {}
+    meta = meta or {}
+    asset_signals = asset_signals or {}
 
-    # 1. Price Memory
-    if institutional_analysis:
-        price_memory = institutional_analysis.get('price_memory', {})
-        memory_signals = price_memory.get('memory_signals', [])
-        fresh_levels = price_memory.get('fresh_levels', [])
-        if memory_signals or fresh_levels:
-            fresh_ratio = len(fresh_levels) / max(1, len(memory_signals) + len(fresh_levels))
-            scores.append(50.0 + (fresh_ratio - 0.5) * 50.0)
+    # Technical score
+    tech = candidate.get("technical_score") or candidate.get("confidence", 0.6)
+    try:
+        tech_score = float(tech)
+    except Exception:
+        tech_score = 0.6
 
-    # 2. Market Fatigue
-    if institutional_analysis:
-        fatigue = institutional_analysis.get('market_fatigue', {})
-        fatigue_state = str(fatigue.get('market_state', '')).upper()
-        if fatigue_state == 'EXHAUSTED':
-            scores.append(30.0)
-        elif fatigue_state == 'FATIGUED':
-            scores.append(40.0)
-        elif fatigue_state == 'NORMAL':
-            scores.append(50.0)
-        elif fatigue_state == 'ENERGETIC':
-            scores.append(65.0)
-
-    # 3. Market Physics
-    if institutional_analysis:
-        physics = institutional_analysis.get('market_physics', {})
-        physics_bias = str(physics.get('physics_bias', '')).upper()
-        if 'BULLISH' in physics_bias or 'BUY' in physics_bias:
-            scores.append(75.0)
-        elif 'BEARISH' in physics_bias or 'SELL' in physics_bias:
-            scores.append(25.0)
-        elif physics_bias:
-            scores.append(50.0)
-
-    # 4. Tape Speed
-    if institutional_analysis:
-        tape = institutional_analysis.get('tape_speed', {})
-        speed_ratio = float(tape.get('speed_ratio', 1.0) or 1.0)
-        if speed_ratio >= 2.0:
-            scores.append(70.0)
-        elif speed_ratio >= 1.5:
-            scores.append(60.0)
-        elif speed_ratio >= 0.8:
-            scores.append(50.0)
-        else:
-            scores.append(35.0)
-
-    # 5. Pressure
-    if institutional_analysis:
-        pressure = institutional_analysis.get('pressure_ratio', {})
-        pressure_norm = float(pressure.get('normalized_pressure', 0.0) or 0.0)
-        scores.append(50.0 + (pressure_norm * 50.0))
-
-    # 6. Microstructure from ticks
-    if ticks_df is not None and len(ticks_df) >= 10:
-        try:
-            if 'time' in ticks_df.columns:
-                duration = (ticks_df['time'].max() - ticks_df['time'].min())
-                if hasattr(duration, 'total_seconds'):
-                    duration = duration.total_seconds()
-                if duration > 0:
-                    tape_speed = len(ticks_df) / duration
-                    speed_score = min(100.0, (tape_speed / 5.0) * 100.0)
-                    scores.append(speed_score)
-        except:
-            pass
-
-    if scores:
-        return sum(scores) / len(scores)
-    return 50.0
-
-
-def _calculate_context_component(
-    candidate: Dict[str, Any],
-    asset_signals: Dict[str, Any]
-) -> float:
-    """Calcule le score Context (phase, alignment, confidence)."""
+    # Context alignment
     phase = str(asset_signals.get("phase", "") or "").lower()
-    conf = float(asset_signals.get("confidence_score", 0.5) or 0.5)
     action = candidate.get("action", "")
-
-    # Alignment
     align = 0.5
     if action == "BUY" and any(k in phase for k in ("bull", "up", "accum", "trend")):
         align = 1.0
     elif action == "SELL" and any(k in phase for k in ("bear", "down", "distrib")):
         align = 1.0
-    elif action == "SELL" and "trend" in phase:
-        align = 0.8
 
-    # Score 0-100
-    context_score = (0.5 * conf + 0.5 * align) * 100.0
-    return max(0.0, min(100.0, context_score))
-
-
-def _calculate_technical_component(
-    candidate: Dict[str, Any],
-    patterns: Dict[str, Any]
-) -> float:
-    """Calcule le score Technical (setup score, patterns)."""
-    # Technical score du candidat
-    tech = candidate.get("technical_score")
-    if tech is None:
-        tech = candidate.get("confidence", 0.6)
-    try:
-        tech_score = float(tech) * 100.0
-    except:
-        tech_score = 60.0
-
-    # Pattern bonus
-    pattern_count = 0
-    if isinstance(patterns, dict):
-        pattern_count = sum(1 for v in patterns.values() if bool(v))
-    elif isinstance(patterns, list):
-        pattern_count = len(patterns)
-
-    pattern_bonus = min(20.0, pattern_count * 5.0)
-
-    return max(0.0, min(100.0, tech_score + pattern_bonus))
-
-
-def _calculate_risk_component(meta: Dict[str, Any]) -> float:
-    """Calcule le score Risk (spread, volatility)."""
+    # Risk
     sp = float(meta.get("spread_pips", 0.0) or 0.0)
+    risk_factor = 1.0 if sp <= 5 else (0.8 if sp <= 10 else 0.6)
 
-    if sp <= 5:
-        risk_score = 100.0
-    elif sp <= 10:
-        risk_score = 80.0
-    elif sp <= 15:
-        risk_score = 60.0
-    else:
-        risk_score = 30.0
+    normalized = (0.5 * tech_score + 0.3 * align + 0.2 * risk_factor)
+    normalized = max(0.0, min(1.0, normalized))
 
-    return risk_score
-
-
-def _determine_decision(
-    final_score: float,
-    components: Dict[str, float],
-    candidate: Dict[str, Any]
-) -> Tuple[str, str]:
-    """Determine decision (BUY/SELL/HOLD) et confidence."""
-    action = candidate.get("action", "")
-
-    # Confidence
-    if final_score >= 75:
-        confidence = "STRONG"
-    elif final_score >= 65:
-        confidence = "GOOD"
-    elif final_score >= 55:
-        confidence = "WEAK"
-    else:
-        confidence = "NONE"
-
-    # Decision
-    if confidence == "NONE":
-        decision = "HOLD"
-    elif action in ("BUY", "SELL"):
-        decision = action
-    else:
-        # Infer from orderflow
-        of_score = components.get('orderflow', 50)
-        if of_score >= 60:
-            decision = "BUY"
-        elif of_score <= 40:
-            decision = "SELL"
-        else:
-            decision = "HOLD"
-
-    return decision, confidence
-
-
-# ============================================================================
-# FONCTION LEGACY (compatibilite avec orderflow_v6.py)
-# ============================================================================
-
-def calculate_score_integrated(
-    metrics: Dict[str, float],
-    patterns,
-    rescue_level: int,
-    rescue_note: str,
-    footprint_data: Optional[Dict[str, Any]] = None,
-    scoring_weights: Optional[Dict[str, float]] = None,
-    current_regime: Optional[str] = None,
-) -> Tuple[float, str, Dict[str, Any]]:
-    """
-    Legacy wrapper pour compatibilite avec orderflow_v6.py.
-    Redirige vers calculate_unified_score.
-    """
-    result = calculate_unified_score(
-        metrics=metrics,
-        patterns=patterns if isinstance(patterns, dict) else {},
-        footprint_data=footprint_data,
-        current_regime=current_regime,
-        rescue_level=rescue_level
-    )
-
-    # Format legacy
-    summary = {
-        "orderflow_score": result['components']['orderflow'],
-        "final_score": result['final_score'],
-        "status": result['status'],
-        "components": result['components'],
-        "detected_regime": current_regime,
-        "rescue_level": rescue_level,
-        "rescue_kind": "none" if rescue_level == 0 else ("soft" if rescue_level == 1 else "hard"),
-        "bias": result['decision'],
+    return {
+        "final_score": round(normalized * 100, 2),
+        "normalized_score": round(normalized, 4),
     }
-
-    return result['final_score'], result['status'], summary
-
-
-# ============================================================================
-# CLASSE WRAPPER (compatibilite avec run_bot.py)
-# ============================================================================
-
-class SimpleAdvancedScorer:
-    """Wrapper classe pour compatibilite avec run_bot.py."""
-
-    def __init__(self, config=None, thresholds=None):
-        self.weights = config or {}
-        self.thresholds = thresholds or {}
-
-    def calculate_composite_score(
-        self,
-        ticks_df=None,
-        candles_df=None,
-        orderflow_score=0.0,
-        institutional_analysis=None
-    ):
-        """Redirige vers calculate_unified_score."""
-        result = calculate_unified_score(
-            ticks_df=ticks_df,
-            candles_df=candles_df,
-            institutional_analysis=institutional_analysis,
-            weights=self.weights
-        )
-        # Ajouter orderflow_score si fourni
-        if orderflow_score > 0:
-            result['components']['orderflow'] = orderflow_score
-
-        # Compatibilite: run_bot.py attend 'composite_score' pas 'final_score'
-        result['composite_score'] = result['final_score']
-
-        # Compatibilite: run_bot.py attend les anciennes cles de composants
-        # Mapper les nouvelles cles vers les anciennes
-        comps = result['components']
-        comps['microstructure'] = comps.get('technical', 50.0)
-        comps['liquidity'] = comps.get('context', 50.0)
-        comps['divergence'] = 50.0  # Neutre par defaut
-        comps['smart_money'] = comps.get('risk', 50.0)
-
-        return result
-
-
-# ============================================================================
-# TEST
-# ============================================================================
-
-if __name__ == "__main__":
-    print("Test calculate_unified_score:")
-    result = calculate_unified_score(
-        metrics={'delta_total': 100, 'total_volume': 1000, 'imbalance_mean': 0.6},
-        candidate={'action': 'BUY', 'technical_score': 0.7},
-        meta={'spread_pips': 3}
-    )
-    print(f"  Score: {result['final_score']}/100")
-    print(f"  Status: {result['status']}")
-    print(f"  Decision: {result['decision']} ({result['confidence']})")
-    print(f"  Components: {result['components']}")

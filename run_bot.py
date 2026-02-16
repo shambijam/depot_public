@@ -27,7 +27,7 @@ from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
 from phase_observer.timing_analyzer import evaluate_trading_conditions
-from strategy.advanced_scoring import SimpleAdvancedScorer
+# 16 FEV 2026: SimpleAdvancedScorer supprime — scoring centralise dans advanced_scoring.calculate_final_score()
 
 
 load_dotenv()
@@ -1670,7 +1670,7 @@ def scalping_worker(
     - Analyse M1 pour l'asset fourni (USDJPY, EURUSD, ou GBPUSD)
     - Timing Gatekeeper → PASS/VETO (filtre session + liquidité)
     - OrderFlow V6 → Source unique de signaux (score 0-100)
-    - MarketAnalyzer.build_decision() → BUY/SELL/HOLD direct
+    - decision_pipeline.decide_scalp_action() → BUY/SELL/HOLD (scoring centralise)
     - Update GlobalScalpingState (thread-safe)
 
     Args:
@@ -1734,16 +1734,7 @@ def scalping_worker(
         logger.warning(f"⚠️ [{asset}] ScalpingStrategy init failed: {e}")
         scalping_strategy = None
 
-    # ✅ NOUVEAU (03 JAN 2026): Instancier SimpleAdvancedScorer pour scoring composite
-    advanced_scorer = None
-    try:
-        # Récupérer poids custom depuis config (optionnel)
-        scoring_weights = strat_cfg.get("advanced_scoring", {}).get("weights", None)
-        advanced_scorer = SimpleAdvancedScorer(config=scoring_weights)
-        logger.info(f"✅ [{asset}] SimpleAdvancedScorer instancié (évolutif)")
-    except Exception as e:
-        logger.warning(f"⚠️ [{asset}] SimpleAdvancedScorer init failed: {e}, fallback OrderFlow V6 seul")
-        advanced_scorer = None
+    # 16 FEV 2026: SimpleAdvancedScorer supprime — scoring centralise dans decision_pipeline
 
     # ⚡ OPTION 1: PRÉ-CALCUL — Squelette trade decision (parties statiques)
     # Créé UNE FOIS au démarrage, réutilisé à chaque cycle avec valeurs dynamiques
@@ -2153,45 +2144,17 @@ def scalping_worker(
                             f"bias={orderflow_result_mini['bias']}"
                         )
 
-                        # ✅ NOUVEAU (03 JAN 2026): Calcul composite score avec SimpleAdvancedScorer
-                        # 🆕 06 JAN 2026 PHASE 3: Ajout institutional_analysis!
-                        if advanced_scorer:
-                            try:
-                                # 🔧 FIX CRITIQUE (06 JAN 2026): institutional_analysis est dans of_v6_result, PAS orderflow_result_mini!
-                                institutional_analysis = of_v6_result.get('institutional_analysis', {})
-
-                                composite_result = advanced_scorer.calculate_composite_score(
-                                    ticks_df=ticks_df,
-                                    candles_df=rates_df_fresh,
-                                    orderflow_score=orderflow_result_mini['score'],
-                                    institutional_analysis=institutional_analysis  # 🆕 PHASE 3!
-                                )
-
-                                # Remplacer le score OrderFlow V6 par le composite score
-                                orderflow_result_mini['score'] = composite_result['composite_score']
-                                orderflow_result_mini['composite_details'] = composite_result
-                                orderflow_result_mini['composite_enabled'] = True
-
-                                # 06 JAN 2026 PHASE 3: Ajout INST dans les logs!
-                                logger.info(
-                                    f"[COMPOSITE_SCORE][{asset}] {composite_result['composite_score']:.1f}/100 | "
-                                    f"Decision={composite_result['decision']} ({composite_result['confidence']}) | "
-                                    f"Components: OF={composite_result['components']['orderflow']:.0f} "
-                                    f"INST={composite_result['components']['institutional']:.0f} "
-                                    f"MS={composite_result['components']['microstructure']:.0f} "
-                                    f"LQ={composite_result['components']['liquidity']:.0f} "
-                                    f"DV={composite_result['components']['divergence']:.0f} "
-                                    f"SM={composite_result['components']['smart_money']:.0f}"
-                                )
-                            except Exception as e_composite:
-                                logger.error(f"[COMPOSITE_SCORE_ERROR] Erreur: {e_composite}, fallback OrderFlow V6 seul", exc_info=True)
-                                orderflow_result_mini['composite_enabled'] = False
-                        else:
-                            orderflow_result_mini['composite_enabled'] = False
+                        # 16 FEV 2026: Extraire fatigue/physics depuis institutional_analysis
+                        # (calcules dans scalping.py, stockes dans of_v6_result)
+                        institutional_analysis = of_v6_result.get('institutional_analysis', {})
+                        fatigue_result = institutional_analysis.get('market_fatigue', {})
+                        physics_result = institutional_analysis.get('market_physics', {})
 
                     except Exception as e_of:
                         logger.critical(f"[ORDERFLOW_V6_ERROR] Erreur: {e_of}", exc_info=True)
-                        orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}, "composite_enabled": False}
+                        orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
+                        fatigue_result = {}
+                        physics_result = {}
 
                 # ═══════════════════════════════════════════════════════════════
                 # 🧠 PRICE MEMORY TREND ANALYSIS (08 JAN 2026)
@@ -2448,6 +2411,9 @@ def scalping_worker(
                     latest=latest,
                     ctx=ctx,
                     logger_ref=logger,
+                    # 16 FEV 2026: Passer fatigue/physics pour scoring centralise
+                    fatigue_result=fatigue_result,
+                    physics_result=physics_result,
                 )
 
                 # Extraire decision_mini depuis fusion_out pour compatibilité dashboard/rapport

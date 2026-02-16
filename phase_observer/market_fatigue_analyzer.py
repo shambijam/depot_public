@@ -121,9 +121,16 @@ class MarketFatigueAnalyzer:
         fatigue_points = 0
         reasons = []
 
-        # 1. Volume décroissant (3 derniers achats)
+        # 1. Volume décroissant (tendance linéaire sur 5+ ticks)
         volumes = recent_buys['volume'].values
-        if len(volumes) >= 3:
+        if len(volumes) >= 5:
+            # Régression linéaire sur les 5 derniers volumes
+            x = np.arange(len(volumes[-5:]))
+            slope = np.polyfit(x, volumes[-5:], 1)[0]
+            if slope < 0:
+                fatigue_points += 3
+                reasons.append('Volume buy décroissant (tendance linéaire)')
+        elif len(volumes) >= 3:
             if volumes[-1] < volumes[-2] < volumes[-3]:
                 fatigue_points += 3
                 reasons.append('Volume buy décroissant')
@@ -148,8 +155,8 @@ class MarketFatigueAnalyzer:
             if len(prices) >= 3 and prices[0] > 0:
                 price_change = (prices[-1] - prices[0]) / prices[0]
 
-                # Si prix stagne (<1 pip) malgré volume buy élevé → absorption
-                if price_change < 0.0001 and np.sum(volumes) > np.mean(volumes) * 15:
+                # Si prix stagne (<3 pips) malgré volume buy élevé → absorption
+                if price_change < 0.0003 and np.sum(volumes) > np.mean(volumes) * 3:
                     fatigue_points += 4  # Forte absorption = forte fatigue
                     reasons.append('Absorption forte (prix stagne malgré achats)')
 
@@ -181,9 +188,15 @@ class MarketFatigueAnalyzer:
         fatigue_points = 0
         reasons = []
 
-        # 1. Volume décroissant
+        # 1. Volume décroissant (tendance linéaire sur 5+ ticks)
         volumes = recent_sells['volume'].values
-        if len(volumes) >= 3:
+        if len(volumes) >= 5:
+            x = np.arange(len(volumes[-5:]))
+            slope = np.polyfit(x, volumes[-5:], 1)[0]
+            if slope < 0:
+                fatigue_points += 3
+                reasons.append('Volume sell décroissant (tendance linéaire)')
+        elif len(volumes) >= 3:
             if volumes[-1] < volumes[-2] < volumes[-3]:
                 fatigue_points += 3
                 reasons.append('Volume sell décroissant')
@@ -208,7 +221,7 @@ class MarketFatigueAnalyzer:
                 price_change = (prices[-1] - prices[0]) / prices[0]
 
                 # Si prix stagne malgré volume sell élevé → absorption
-                if abs(price_change) < 0.0001 and np.sum(volumes) > np.mean(volumes) * 15:
+                if abs(price_change) < 0.0003 and np.sum(volumes) > np.mean(volumes) * 3:
                     fatigue_points += 4
                     reasons.append('Absorption forte (prix stagne malgré ventes)')
 
@@ -262,8 +275,8 @@ class MarketFatigueAnalyzer:
             avg_recent_tr = np.mean(recent_tr)
             avg_older_tr = np.mean(older_tr)
 
-            # Si ATR récent < 70% ATR ancien → momentum fatigué
-            if avg_older_tr > 0 and avg_recent_tr < avg_older_tr * 0.7:
+            # Si ATR récent < 60% ATR ancien → momentum fatigué
+            if avg_older_tr > 0 and avg_recent_tr < avg_older_tr * 0.6:
                 fatigue_points += 4
                 reasons.append('ATR décroissant (volatilité chute)')
 

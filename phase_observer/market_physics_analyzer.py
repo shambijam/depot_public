@@ -88,8 +88,17 @@ class MarketPhysicsAnalyzer:
         # PRINCIPE 5: Équilibre thermodynamique (entropie du marché)
         market_entropy = self._calculate_market_entropy(ticks_df)
 
-        # Déterminer bias global basé sur la physique
-        physics_bias = self._derive_physics_bias(energy_conservation, price_inertia, market_entropy)
+        # Déterminer bias global basé sur la physique (intégrant barriers + centripetal)
+        physics_bias = self._derive_physics_bias(
+            energy_conservation, price_inertia, market_entropy,
+            centripetal_acceleration, energy_barriers
+        )
+
+        # Calculer physics_score 0-10 pour le scoring
+        physics_score = self._calculate_physics_score(
+            energy_conservation, price_inertia, market_entropy,
+            centripetal_acceleration, energy_barriers
+        )
 
         return {
             'energy_conservation': energy_conservation,
@@ -97,7 +106,8 @@ class MarketPhysicsAnalyzer:
             'centripetal_acceleration': centripetal_acceleration,
             'energy_barriers': energy_barriers,
             'market_entropy': market_entropy,
-            'physics_bias': physics_bias
+            'physics_bias': physics_bias,
+            'physics_score': physics_score
         }
 
     def _analyze_energy_conservation(
@@ -265,8 +275,8 @@ class MarketPhysicsAnalyzer:
         # Force centripète = f(distance²) (loi inverse du carré)
         centripetal_force = distance_pct ** 2
 
-        # Reversal probable si distance > 0.3% (30 pips)
-        reversal_likely = distance_pct > 0.003
+        # Reversal probable si distance > 0.05% (5 pips)
+        reversal_likely = distance_pct > 0.0005
 
         return {
             'mean_price': mean_price,
@@ -389,11 +399,60 @@ class MarketPhysicsAnalyzer:
             'sell_ratio': p_sell
         }
 
+    def _calculate_physics_score(
+        self,
+        energy_conservation: Dict[str, Any],
+        price_inertia: Dict[str, Any],
+        market_entropy: Dict[str, Any],
+        centripetal_acceleration: Dict[str, Any],
+        energy_barriers: Dict[str, Any],
+    ) -> float:
+        """
+        Calcule un score physique 0-10 composite.
+
+        Returns:
+            float: Score 0-10
+        """
+        score = 5.0  # Neutre
+
+        # Énergie: surplus=bon, déficit=mauvais
+        if energy_conservation.get('energy_surplus'):
+            score += 2.0
+        elif energy_conservation.get('energy_deficit'):
+            score -= 2.0
+
+        # Inertie forte et cohérente
+        if price_inertia.get('likely_to_continue'):
+            score += 1.5
+        elif price_inertia.get('momentum', 0) == 0:
+            score -= 0.5
+
+        # Entropie
+        entropy_state = market_entropy.get('market_state', 'UNKNOWN')
+        if entropy_state == 'ORDERED':
+            score += 1.0
+        elif entropy_state == 'CHAOTIC':
+            score -= 1.5
+
+        # Centripetal: distance de la moyenne
+        if centripetal_acceleration.get('reversal_likely'):
+            score -= 1.0  # Trop éloigné = risque mean reversion
+
+        # Barriers proches
+        dist_up = energy_barriers.get('distance_to_resistance_pct', 999)
+        dist_down = energy_barriers.get('distance_to_support_pct', 999)
+        if dist_up < 0.001 or dist_down < 0.001:
+            score -= 0.5  # Barrière très proche
+
+        return max(0.0, min(10.0, score))
+
     def _derive_physics_bias(
         self,
         energy_conservation: Dict[str, Any],
         price_inertia: Dict[str, Any],
-        market_entropy: Dict[str, Any]
+        market_entropy: Dict[str, Any],
+        centripetal_acceleration: Dict[str, Any] = None,
+        energy_barriers: Dict[str, Any] = None,
     ) -> str:
         """
         Détermine le bias global basé sur les principes physiques
@@ -402,10 +461,14 @@ class MarketPhysicsAnalyzer:
             energy_conservation: Résultat analyse énergie
             price_inertia: Résultat analyse inertie
             market_entropy: Résultat analyse entropie
+            centripetal_acceleration: Résultat accélération centripète
+            energy_barriers: Résultat barrières énergétiques
 
         Returns:
             str: 'BUY' | 'SELL' | 'NEUTRAL'
         """
+        centripetal_acceleration = centripetal_acceleration or {}
+        energy_barriers = energy_barriers or {}
         bias_points = 0
 
         # Énergie: surplus = continuation, déficit = stop
@@ -438,10 +501,28 @@ class MarketPhysicsAnalyzer:
             elif market_entropy.get('sell_ratio', 0.5) > 0.6:
                 bias_points -= 1
 
-        # Décision finale
-        if bias_points >= 2:
+        # Centripetal: mean reversion si prix trop éloigné
+        if centripetal_acceleration.get('reversal_likely'):
+            current = centripetal_acceleration.get('current_price', 0)
+            mean = centripetal_acceleration.get('mean_price', 0)
+            if current > 0 and mean > 0:
+                if current > mean:
+                    bias_points -= 1  # Prix au-dessus → pression baissière
+                else:
+                    bias_points += 1  # Prix en-dessous → pression haussière
+
+        # Barriers: résistance/support proches
+        dist_up = energy_barriers.get('distance_to_resistance_pct', 999)
+        dist_down = energy_barriers.get('distance_to_support_pct', 999)
+        if dist_up < 0.001:  # Résistance très proche (<1 pip)
+            bias_points -= 1
+        if dist_down < 0.001:  # Support très proche (<1 pip)
+            bias_points += 1
+
+        # Décision finale (seuil abaissé: >=1 / <=-1)
+        if bias_points >= 1:
             return 'BUY'
-        elif bias_points <= -2:
+        elif bias_points <= -1:
             return 'SELL'
         else:
             return 'NEUTRAL'
