@@ -1013,11 +1013,16 @@ class ScalpingStrategy(BaseStrategy):
                 result["signal_quality"] = "NO_TRADE"
 
             delta_direction = delta_details.get("direction", "neutral")
+            delta_imbalance = fp_summary.get("imbalance", 0.50) if isinstance(fp_summary, dict) else 0.50
 
             # ═══════════════════════════════════════════════════════════════
-            # 👑 12 FEV 2026: MTF QUEEN RULE V2 - Direction IMPOSÉE par PMA
-            # Le price_memory_analyzer analyse M30+M15+M5+M1 et donne un verdict.
-            # La stratégie REFUSE d'émettre un signal contre ce verdict.
+            # 👑 16 FEV 2026: MTF QUEEN RULE V3 - LOGIQUE ASYMETRIQUE
+            #
+            # Delta BULLISH = TRES FIABLE → BUY les yeux fermés
+            # Delta BEARISH = PAS FIABLE  → ignoré pour la direction
+            #
+            # BUY  : Delta bullish suffit. MTF BULLISH = bonus (+15)
+            # SELL : MTF BEARISH seul guide. Delta ignoré pour direction.
             # ═══════════════════════════════════════════════════════════════
             mtf_direction = asset_signals.get("mtf_direction", "NEUTRAL")
 
@@ -1026,44 +1031,56 @@ class ScalpingStrategy(BaseStrategy):
             result["mtf_conflict"] = False
             result["mtf_bonus"] = False
 
+            # --- BUY : Delta bullish fiable, on y va ---
             if delta_direction == "bullish":
+                result["bias"] = "BUY"
                 if mtf_direction == "BULLISH":
-                    result["bias"] = "BUY"
+                    # Delta fiable + MTF confirme = meilleur cas
                     result["mtf_3_3"] = True
                     result["mtf_bonus"] = True
                     result["total_score"] = min(100.0, result["total_score"] + 15)
                     self.logger.info(
-                        f"[MTF_QUEEN][{asset}] BUY AUTORISE - MTF={mtf_direction} + delta={delta_direction} → +15 pts (score={result['total_score']}/100)"
+                        f"[MTF_QUEEN][{asset}] BUY - delta bullish "
+                        f"(imb={delta_imbalance:.2f}) + MTF=BULLISH → +15 pts "
+                        f"(score={result['total_score']}/100)"
                     )
                 else:
-                    # MTF dit BEARISH ou NEUTRAL → pas de BUY
-                    result["bias"] = "NEUTRAL"
-                    result["mtf_veto"] = True
+                    # Delta bullish fiable, MTF pas aligné = pas de bonus
                     result["mtf_conflict"] = True
-                    self.logger.warning(
-                        f"[MTF_QUEEN][{asset}] VETO BUY - MTF={mtf_direction} vs delta={delta_direction}"
+                    self.logger.info(
+                        f"[MTF_QUEEN][{asset}] BUY - delta bullish fiable "
+                        f"(imb={delta_imbalance:.2f}), MTF={mtf_direction} → pas de bonus"
                     )
 
-            elif delta_direction == "bearish":
-                if mtf_direction == "BEARISH":
-                    result["bias"] = "SELL"
-                    result["mtf_3_3"] = True
+            # --- SELL : MTF BEARISH est le seul guide ---
+            elif mtf_direction == "BEARISH":
+                result["bias"] = "SELL"
+                result["mtf_3_3"] = True
+                if delta_direction == "bearish":
+                    # Delta confirme = bonus
                     result["mtf_bonus"] = True
                     result["total_score"] = min(100.0, result["total_score"] + 15)
                     self.logger.info(
-                        f"[MTF_QUEEN][{asset}] SELL AUTORISE - MTF={mtf_direction} + delta={delta_direction} → +15 pts (score={result['total_score']}/100)"
+                        f"[MTF_QUEEN][{asset}] SELL - MTF=BEARISH + delta confirme "
+                        f"(imb={delta_imbalance:.2f}) → +15 pts "
+                        f"(score={result['total_score']}/100)"
                     )
                 else:
-                    # MTF dit BULLISH ou NEUTRAL → pas de SELL
-                    result["bias"] = "NEUTRAL"
-                    result["mtf_veto"] = True
-                    result["mtf_conflict"] = True
-                    self.logger.warning(
-                        f"[MTF_QUEEN][{asset}] VETO SELL - MTF={mtf_direction} vs delta={delta_direction}"
+                    # MTF impose SELL, delta non-aligné = pas de bonus
+                    self.logger.info(
+                        f"[MTF_QUEEN][{asset}] SELL - MTF=BEARISH IMPOSE "
+                        f"(delta={delta_direction}, imb={delta_imbalance:.2f}) → pas de bonus"
                     )
 
+            # --- Pas de signal ---
             else:
+                # Delta pas bullish + MTF pas BEARISH → rien
                 result["bias"] = "NEUTRAL"
+                if delta_direction != "neutral" or mtf_direction != "NEUTRAL":
+                    self.logger.debug(
+                        f"[MTF_QUEEN][{asset}] NEUTRAL - delta={delta_direction}, "
+                        f"MTF={mtf_direction}"
+                    )
 
             # 🔧 FIX (03 JAN 2026): Calculer variables pour logs (compatibilité ancien système binaire)
             liquid = volume_confirmation_score >= 10.0
