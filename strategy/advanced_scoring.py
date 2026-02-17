@@ -341,12 +341,12 @@ def calculate_final_score(
     # LOG
     if adjustments:
         adj_emoji = "+" if bonus_total > malus_total else ("-" if malus_total > bonus_total else "=")
+        adj_summary = " | ".join(adjustments)
         _log.info(
             f"[SCORING][{asset}] Score: {score_brut:.1f} -> {score_final:.1f} "
             f"(Bonus: +{bonus_total:.0f}, Malus: -{malus_total:.0f}) [{adj_emoji}]"
         )
-        for adj in adjustments:
-            _log.debug(f"   > {adj}")
+        _log.info(f"[SCORING_DETAIL][{asset}] {adj_summary}")
 
     return {
         "score_brut": score_brut,
