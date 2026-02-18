@@ -1088,7 +1088,7 @@ class DecisionPipeline:
                 elif delta_weighted < 0 and cvd_slope < 0:
                     cvd_aligned = True
 
-                delta_threshold = min_price_change_pips * 3
+                delta_threshold = min_price_change_pips * 0.6
 
                 filtre1_direction = "HOLD"
                 filtre1_confidence = 0.0
@@ -1137,8 +1137,8 @@ class DecisionPipeline:
 
                 # FILTRE 2: MICROSTRUCTURE
                 conditions_micro = []
-                volume_strong = vol_ratio > 1.5
-                conditions_micro.append(("Volume>150%", volume_strong, f"ratio={vol_ratio:.2f}"))
+                volume_strong = vol_ratio > 1.2
+                conditions_micro.append(("Volume>120%", volume_strong, f"ratio={vol_ratio:.2f}"))
 
                 tickrate_min_threshold = 2.0
                 if asset == "USDCHF":
@@ -1149,12 +1149,12 @@ class DecisionPipeline:
                 activity_high = tickrate >= tickrate_min_threshold
                 conditions_micro.append(("Ticks>min", activity_high, f"{tickrate:.1f} (min={tickrate_min_threshold})"))
 
-                no_gaps = coverage_s >= 5.0
-                conditions_micro.append(("Coverage>5s", no_gaps, f"{coverage_s:.1f}s"))
+                no_gaps = coverage_s >= 2.0
+                conditions_micro.append(("Coverage>2s", no_gaps, f"{coverage_s:.1f}s"))
                 conditions_micro.append(("CVD aligned", cvd_aligned, f"slope={cvd_slope:.2f}"))
 
                 micro_passed = sum(1 for _, passed, _ in conditions_micro if passed)
-                filtre2_pass = micro_passed >= 3
+                filtre2_pass = micro_passed >= 2
                 filtre2_status = f"✅ PASS ({micro_passed}/4)" if filtre2_pass else f"❌ FAIL ({micro_passed}/4)"
                 filtre2_detail = " | ".join([f"{name}:{'✅' if p else '❌'}({d})" for name, p, d in conditions_micro])
 
@@ -1163,7 +1163,7 @@ class DecisionPipeline:
                 fatigue_ok = True
                 conditions_context.append(("Fatigue OK", fatigue_ok, "N/A"))
 
-                memory_fresh = memory_clarity >= 0.5
+                memory_fresh = memory_clarity >= 0.3
                 conditions_context.append(("Memory fresh", memory_fresh, f"clarity={memory_clarity:.0%}"))
 
                 memory_aligned = False
@@ -1174,12 +1174,12 @@ class DecisionPipeline:
                 conditions_context.append(("Memory aligned", memory_aligned, f"{memory_trend_direction}"))
 
                 context_passed = sum(1 for _, passed, _ in conditions_context if passed)
-                filtre3_pass = context_passed >= 2
+                filtre3_pass = context_passed >= 1
                 filtre3_status = f"✅ PASS ({context_passed}/3)" if filtre3_pass else f"❌ FAIL ({context_passed}/3)"
                 filtre3_detail = " | ".join([f"{name}:{'✅' if p else '❌'}({d})" for name, p, d in conditions_context])
 
-                # DÉCISION FINALE: LES 3 FILTRES DOIVENT PASSER
-                all_filters_pass = filtre1_direction in ["BUY", "SELL"] and filtre2_pass and filtre3_pass
+                # DÉCISION FINALE: F1 obligatoire + au moins 1 des 2 autres (F2 ou F3)
+                all_filters_pass = filtre1_direction in ["BUY", "SELL"] and (filtre2_pass or filtre3_pass)
 
                 bonus_memory = 30 if memory_aligned else 0
                 adjusted_score = original_score + bonus_memory
