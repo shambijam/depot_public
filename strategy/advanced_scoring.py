@@ -218,11 +218,26 @@ def calculate_final_score(
                 ird_impact = 15.0
                 bonus_total += 15.0
                 adjustments.append(f"BONUS_IRD: +15 (Score={inst_score:.0f}, Trend={inst_trend} aligne)")
-        elif trend_opposed and inst_result.get('reversal_detected', False):
-            ird_reversal_opposed = True
-            adjustments.append(
-                f"FLAG_IRD_REVERSAL: Reversal {inst_trend} OPPOSE au signal {signal_action} (Score={inst_score:.0f})"
-            )
+            elif inst_score >= 40:
+                ird_impact = 10.0
+                bonus_total += 10.0
+                adjustments.append(f"BONUS_IRD_MODERATE: +10 (Score={inst_score:.0f}, Trend={inst_trend} aligne)")
+        elif trend_opposed:
+            # IRD OPPOSE au signal — malus progressif selon le score
+            if inst_result.get('reversal_detected', False):
+                ird_reversal_opposed = True
+                adjustments.append(
+                    f"FLAG_IRD_REVERSAL: Reversal {inst_trend} OPPOSE au signal {signal_action} (Score={inst_score:.0f})"
+                )
+            # 18 FEV 2026: Malus IRD contradiction (le rapport a raison — IRD doit influencer)
+            if inst_score >= 60:
+                ird_impact = -20.0
+                malus_total += 20.0
+                adjustments.append(f"MALUS_IRD_OPPOSE_FORT: -20 (Score={inst_score:.0f}, Trend={inst_trend} CONTRE {signal_action})")
+            elif inst_score >= 40:
+                ird_impact = -10.0
+                malus_total += 10.0
+                adjustments.append(f"MALUS_IRD_OPPOSE: -10 (Score={inst_score:.0f}, Trend={inst_trend} CONTRE {signal_action})")
 
     # ══════════════════════════════════════════════════════
     # 6. MALUS IRD FATIGUE (migre depuis PMA)

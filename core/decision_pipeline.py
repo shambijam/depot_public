@@ -1292,6 +1292,19 @@ class DecisionPipeline:
             orderflow_result_mini['score_before_pma'] = score_brut
             orderflow_result_mini['score'] = score_final
 
+            # LOG DECISION_REASON — synthese de tous les systemes
+            inst_trend_log = inst_result.get('new_trend', 'N/A') if inst_result else 'N/A'
+            inst_score_log = f"{inst_score:.0f}" if inst_score else "0"
+            _log.info(
+                f"[DECISION_REASON][{asset}] "
+                f"MTF={mtf_direction}({getattr(mtf_verdict, 'alignment_count', 0)}/4) | "
+                f"IRD={inst_trend_log}(score={inst_score_log}) | "
+                f"OF={orderflow_result_mini.get('bias', 'N/A')}(score={score_brut:.0f}) | "
+                f"Score: {score_brut:.0f}→{score_final:.0f} "
+                f"(+{pma_bonus:.0f}/-{pma_malus:.0f}) | "
+                f"Signal={signal_action}"
+            )
+
             # VETO DUR: score ajuste < 60
             VETO_DUR_THRESHOLD = 60.0
             if signal_action in ["BUY", "SELL"] and score_final < VETO_DUR_THRESHOLD:
