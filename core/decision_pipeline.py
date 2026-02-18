@@ -1005,6 +1005,27 @@ class DecisionPipeline:
                 "rationale": f"OrderFlow insuffisant (score={orderflow_score:.1f}, bias={of_bias}, seuil={asset_min_score_worker})",
             }
 
+        # ════════════════════════════════════════════════════════════
+        # 👑 18 FEV 2026: MTF HARD GATE — Le MTF est ROI
+        # Signal OPPOSE au MTF → FORCE HOLD. Pas de calcul, pas de score.
+        # ════════════════════════════════════════════════════════════
+        if decision_mini["action"] in ["BUY", "SELL"] and mtf_direction in ["BULLISH", "BEARISH"]:
+            mtf_opposed = (
+                (mtf_direction == "BULLISH" and decision_mini["action"] == "SELL") or
+                (mtf_direction == "BEARISH" and decision_mini["action"] == "BUY")
+            )
+            if mtf_opposed:
+                old_action = decision_mini["action"]
+                decision_mini["action"] = "HOLD"
+                decision_mini["confidence"] = 0.0
+                decision_mini["rationale"] = (
+                    f"MTF_HARD_GATE: {old_action} INTERDIT car MTF={mtf_direction}"
+                )
+                _log.critical(
+                    f"[MTF_HARD_GATE][{asset}] ❌ {old_action} BLOQUE — "
+                    f"MTF={mtf_direction} interdit {old_action}. HOLD force."
+                )
+
         _log.info(
             f"[DECISION][{asset}] action={decision_mini['action']} | "
             f"confidence={decision_mini['confidence']:.2f} | "
@@ -1162,6 +1183,20 @@ class DecisionPipeline:
 
                 bonus_memory = 30 if memory_aligned else 0
                 adjusted_score = original_score + bonus_memory
+
+                # 18 FEV 2026: MTF HARD GATE sur Triple Filtre aussi
+                mtf_tf_opposed = (
+                    filtre1_direction in ["BUY", "SELL"] and
+                    mtf_direction in ["BULLISH", "BEARISH"] and
+                    ((mtf_direction == "BULLISH" and filtre1_direction == "SELL") or
+                     (mtf_direction == "BEARISH" and filtre1_direction == "BUY"))
+                )
+                if mtf_tf_opposed:
+                    all_filters_pass = False
+                    _log.critical(
+                        f"[MTF_HARD_GATE][{asset}] ❌ Triple Filtre {filtre1_direction} "
+                        f"BLOQUE — MTF={mtf_direction}"
+                    )
 
                 if all_filters_pass and adjusted_score >= asset_min_score_worker:
                     decision_mini["action"] = filtre1_direction

@@ -1016,13 +1016,14 @@ class ScalpingStrategy(BaseStrategy):
             delta_imbalance = fp_summary.get("imbalance", 0.50) if isinstance(fp_summary, dict) else 0.50
 
             # ═══════════════════════════════════════════════════════════════
-            # 👑 16 FEV 2026: MTF QUEEN RULE V3 - LOGIQUE ASYMETRIQUE
+            # 👑 18 FEV 2026: MTF QUEEN RULE V4 - MTF EST ROI
             #
-            # Delta BULLISH = TRES FIABLE → BUY les yeux fermés
-            # Delta BEARISH = PAS FIABLE  → ignoré pour la direction
-            #
-            # BUY  : Delta bullish suffit. MTF BULLISH = bonus (+15)
-            # SELL : MTF BEARISH seul guide. Delta ignoré pour direction.
+            # REGLE ABSOLUE: Le MTF decide la direction. TOUJOURS.
+            #   MTF BULLISH  → seul BUY autorise (SELL interdit)
+            #   MTF BEARISH  → seul SELL autorise (BUY interdit)
+            #   MTF NEUTRAL  → delta decide
+            # Delta aligne avec MTF → bonus +15
+            # Delta oppose au MTF  → IGNORE (pas de trade contre MTF)
             # ═══════════════════════════════════════════════════════════════
             mtf_direction = asset_signals.get("mtf_direction", "NEUTRAL")
 
@@ -1031,33 +1032,29 @@ class ScalpingStrategy(BaseStrategy):
             result["mtf_conflict"] = False
             result["mtf_bonus"] = False
 
-            # --- BUY : Delta bullish fiable, on y va ---
-            if delta_direction == "bullish":
+            # --- MTF BULLISH → BUY uniquement ---
+            if mtf_direction == "BULLISH":
                 result["bias"] = "BUY"
-                if mtf_direction == "BULLISH":
-                    # Delta fiable + MTF confirme = meilleur cas
-                    result["mtf_3_3"] = True
+                result["mtf_3_3"] = True
+                if delta_direction == "bullish":
                     result["mtf_bonus"] = True
                     result["total_score"] = min(100.0, result["total_score"] + 15)
                     self.logger.info(
-                        f"[MTF_QUEEN][{asset}] BUY - delta bullish "
-                        f"(imb={delta_imbalance:.2f}) + MTF=BULLISH → +15 pts "
+                        f"[MTF_QUEEN][{asset}] BUY - MTF=BULLISH + delta confirme "
+                        f"(imb={delta_imbalance:.2f}) → +15 pts "
                         f"(score={result['total_score']}/100)"
                     )
                 else:
-                    # Delta bullish fiable, MTF pas aligné = pas de bonus
-                    result["mtf_conflict"] = True
                     self.logger.info(
-                        f"[MTF_QUEEN][{asset}] BUY - delta bullish fiable "
-                        f"(imb={delta_imbalance:.2f}), MTF={mtf_direction} → pas de bonus"
+                        f"[MTF_QUEEN][{asset}] BUY - MTF=BULLISH IMPOSE "
+                        f"(delta={delta_direction}, imb={delta_imbalance:.2f}) → pas de bonus"
                     )
 
-            # --- SELL : MTF BEARISH est le seul guide ---
+            # --- MTF BEARISH → SELL uniquement ---
             elif mtf_direction == "BEARISH":
                 result["bias"] = "SELL"
                 result["mtf_3_3"] = True
                 if delta_direction == "bearish":
-                    # Delta confirme = bonus
                     result["mtf_bonus"] = True
                     result["total_score"] = min(100.0, result["total_score"] + 15)
                     self.logger.info(
@@ -1066,20 +1063,29 @@ class ScalpingStrategy(BaseStrategy):
                         f"(score={result['total_score']}/100)"
                     )
                 else:
-                    # MTF impose SELL, delta non-aligné = pas de bonus
                     self.logger.info(
                         f"[MTF_QUEEN][{asset}] SELL - MTF=BEARISH IMPOSE "
                         f"(delta={delta_direction}, imb={delta_imbalance:.2f}) → pas de bonus"
                     )
 
-            # --- Pas de signal ---
+            # --- MTF NEUTRAL → delta decide ---
             else:
-                # Delta pas bullish + MTF pas BEARISH → rien
-                result["bias"] = "NEUTRAL"
-                if delta_direction != "neutral" or mtf_direction != "NEUTRAL":
+                if delta_direction == "bullish":
+                    result["bias"] = "BUY"
+                    self.logger.info(
+                        f"[MTF_QUEEN][{asset}] BUY - MTF=NEUTRAL, delta bullish "
+                        f"(imb={delta_imbalance:.2f}) → pas de bonus MTF"
+                    )
+                elif delta_direction == "bearish":
+                    result["bias"] = "SELL"
+                    self.logger.info(
+                        f"[MTF_QUEEN][{asset}] SELL - MTF=NEUTRAL, delta bearish "
+                        f"(imb={delta_imbalance:.2f}) → pas de bonus MTF"
+                    )
+                else:
+                    result["bias"] = "NEUTRAL"
                     self.logger.debug(
-                        f"[MTF_QUEEN][{asset}] NEUTRAL - delta={delta_direction}, "
-                        f"MTF={mtf_direction}"
+                        f"[MTF_QUEEN][{asset}] NEUTRAL - MTF=NEUTRAL, delta=neutral"
                     )
 
             # 🔧 FIX (03 JAN 2026): Calculer variables pour logs (compatibilité ancien système binaire)
@@ -2569,16 +2575,25 @@ class ScalpingStrategy(BaseStrategy):
                         d = float(fp_summary.get("delta_total", 0))
                         if d > 0:
                             action = "BUY"
-                            self.logger.info(
-                                f"[{asset}] 🟢 Action=BUY (delta={d:.0f} > 0)"
-                            )
                         elif d < 0:
                             action = "SELL"
-                            self.logger.info(
-                                f"[{asset}] 🔴 Action=SELL (delta={d:.0f} < 0)"
-                            )
                 except Exception:
                     pass
+
+                # 18 FEV 2026: MTF HARD GATE — Le MTF est ROI
+                # Toute action opposee au MTF est BLOQUEE ici
+                mtf_dir_eval = asset_signals.get("mtf_direction", "NEUTRAL")
+                if action and mtf_dir_eval in ["BULLISH", "BEARISH"]:
+                    mtf_eval_opposed = (
+                        (mtf_dir_eval == "BULLISH" and action == "SELL") or
+                        (mtf_dir_eval == "BEARISH" and action == "BUY")
+                    )
+                    if mtf_eval_opposed:
+                        self.logger.info(
+                            f"[MTF_HARD_GATE][{asset}] ❌ {action} BLOQUE par MTF={mtf_dir_eval} "
+                            f"→ force a NEUTRAL"
+                        )
+                        action = None
 
                 # 06 JAN 2026: LOG FINAL de l'action décidée
                 if action:
@@ -2800,6 +2815,19 @@ class ScalpingStrategy(BaseStrategy):
                         meta=meta,
                         cfg=range_cfg,
                     )
+                    # 18 FEV 2026: MTF HARD GATE sur range_accumulation
+                    if range_decision and mtf_dir_eval in ["BULLISH", "BEARISH"]:
+                        ra_action = range_decision.get("action", "")
+                        ra_opposed = (
+                            (mtf_dir_eval == "BULLISH" and ra_action == "SELL") or
+                            (mtf_dir_eval == "BEARISH" and ra_action == "BUY")
+                        )
+                        if ra_opposed:
+                            self.logger.info(
+                                f"[MTF_HARD_GATE][{asset}] ❌ Range accum {ra_action} "
+                                f"BLOQUE par MTF={mtf_dir_eval}"
+                            )
+                            range_decision = None
                     if range_decision:
                         range_decision.setdefault("strategy_type", "scalping")
                         range_decision.setdefault("rule_name", "range_accumulation")
@@ -3542,10 +3570,21 @@ class ScalpingStrategy(BaseStrategy):
             return False
 
     def _infer_action_from_signals(self, signals: Dict[str, Any]) -> Optional[str]:
-        mtf_dir = str(signals.get("mtf_direction", "none")).lower()
+        # 18 FEV 2026: MTF EST ROI — utiliser mtf_direction comme source primaire
+        mtf_dir_raw = str(signals.get("mtf_direction", "NEUTRAL")).upper()
+
+        # MTF BULLISH/BEARISH → direction imposee
+        if mtf_dir_raw == "BULLISH":
+            return "BUY"
+        elif mtf_dir_raw == "BEARISH":
+            return "SELL"
+
+        # Legacy: "up"/"down" format
+        mtf_dir = mtf_dir_raw.lower()
         if mtf_dir in {"up", "down"}:
             return "BUY" if mtf_dir == "up" else "SELL"
 
+        # MTF NEUTRAL → phase comme fallback MAIS filtree par MTF
         phase = str(
             signals.get("phase_memory_stabilized", signals.get("phase", ""))
         ).lower()

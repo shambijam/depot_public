@@ -90,15 +90,15 @@ class InstitutionalReversalDetector:
                 "institutional_validation": True
             },
             "signals": {
-                # Poids REDISTRIBUÉS (16 FEV 2026) - 4 couches core + CVD Flows
+                # Poids NORMALISES a 1.0 (18 FEV 2026) - 4 couches core + CVD Flows
                 "changepoint_weight": 0.20,      # Changepoint (statistique)
-                "divergence_weight": 0.35,       # Divergence Multi-TF (M1+M5) - CRITIQUE
-                "accumulation_weight": 0.25,     # Smart Money Wyckoff - CŒUR IRD
-                "pattern_weight": 0.20,          # ML Pattern Recognition (augmenté)
-                "capital_flows_weight": 0.10,    # CVD Capital Flows (intégré au scoring)
-                # DÉSACTIVÉS (géré par PMA/MPA):
-                # "fatigue_weight": 0.0,         # → VETO seulement
-                # "microstructure_m1_weight": 0.0, # → PMA
+                "divergence_weight": 0.30,       # Divergence Multi-TF (M1+M5) - CRITIQUE
+                "accumulation_weight": 0.25,     # Smart Money Wyckoff - COEUR IRD
+                "pattern_weight": 0.15,          # ML Pattern Recognition
+                "capital_flows_weight": 0.10,    # CVD Capital Flows
+                # DESACTIVES (gere par PMA/MPA) — cles presentes pour eviter KeyError
+                "fatigue_weight": 0.0,
+                "microstructure_m1_weight": 0.0,
             },
             "thresholds": {
                 "volume_spike": 2.5,       # 250% de la moyenne
@@ -387,15 +387,9 @@ class InstitutionalReversalDetector:
             )
             signals.append(div_m1)
 
-        # M5 divergence (CVD moyenné sur M5)
-        if 'candles_m5' in market_data and 'cvd_values' in market_data:
-            cvd_m5 = self._aggregate_cvd_to_m5(market_data['cvd_values'])
-            div_m5 = self._detect_advanced_divergence(
-                market_data['candles_m5'],
-                cvd_m5,
-                timeframe='M5'
-            )
-            signals.append(div_m5)
+        # 18 FEV 2026: M5 divergence DESACTIVEE — 50 M1 CVD → 10 M5 apres
+        # aggregation, mais la detection demande 30+ valeurs → toujours 0.0
+        # On garde M1 divergence seule (50 valeurs, suffit largement)
 
         return signals
 
@@ -735,19 +729,20 @@ class InstitutionalReversalDetector:
         avg_volume = np.mean(vol_last_20)
         recent_volume = np.mean(vol_last_20[-5:])
 
-        # ACCUMULATION : Range étroit (<2%), volume élevé
-        if range_pct < 0.02 and recent_volume > avg_volume * 1.3:
-            # Vérifie si prix bas du range
+        # ACCUMULATION : Range etroit (<5%), volume eleve
+        # 18 FEV 2026: seuil range 0.02 → 0.05, volume 1.3 → 1.2 (etait trop strict)
+        if range_pct < 0.05 and recent_volume > avg_volume * 1.2:
+            # Verifie si prix bas du range
             current_price = last_20[-1]['close']
             range_low = min([c['low'] for c in last_20])
-            if current_price < range_low + price_range * 0.3:
+            if current_price < range_low + price_range * 0.35:
                 return "ACCUMULATION"
 
-        # DISTRIBUTION : Range étroit, volume élevé, prix haut
-        if range_pct < 0.02 and recent_volume > avg_volume * 1.3:
+        # DISTRIBUTION : Range etroit, volume eleve, prix haut
+        if range_pct < 0.05 and recent_volume > avg_volume * 1.2:
             current_price = last_20[-1]['close']
             range_high = max([c['high'] for c in last_20])
-            if current_price > range_high - price_range * 0.3:
+            if current_price > range_high - price_range * 0.35:
                 return "DISTRIBUTION"
 
         return "NEUTRAL"
@@ -1510,14 +1505,15 @@ class InstitutionalReversalDetector:
         flow_score = 0.0
         direction = "NEUTRAL"
 
-        if abs(cvd_trend) > 0.7:
+        # 18 FEV 2026: seuils abaisses (0.7→0.35, 1.5→1.0, 0.6→0.4)
+        if abs(cvd_trend) > 0.35:
             flow_score += 40.0
             direction = "BULLISH" if cvd_trend > 0 else "BEARISH"
 
-        if cvd_acceleration > 1.5:
+        if cvd_acceleration > 1.0:
             flow_score += 30.0
 
-        if cvd_volume_efficiency > 0.6:
+        if cvd_volume_efficiency > 0.4:
             flow_score += 20.0
 
         if flow_reversal:
@@ -1679,8 +1675,8 @@ class InstitutionalReversalDetector:
         if total_weight == 0:
             return 0.0
 
-        # Score normalisé (0-100)
-        base_score = (weighted_sum / total_weight)
+        # Score normalise (0-100) — diviser par max(1.0, total_weight) pour eviter distorsion
+        base_score = (weighted_sum / max(1.0, total_weight))
 
         # Boost par couches bonus (confluence + flows)
         bonus_boost = 0.0

@@ -102,6 +102,21 @@ def calculate_final_score(
     micro_res_impact = 0.0
 
     # ══════════════════════════════════════════════════════
+    # 0. DETECTER ALIGNEMENT MTF (18 FEV 2026)
+    # Quand MTF 3/4 ou 4/4 confirme la direction du signal,
+    # les malus physics/fatigue sont reduits de 40%
+    # car le macro valide malgre le bruit local.
+    # ══════════════════════════════════════════════════════
+    mtf_alignment_count = getattr(mtf_verdict, 'alignment_count', 0) if mtf_verdict else 0
+    mtf_strong_aligned = (
+        mtf_alignment_count >= 3 and
+        ((mtf_direction == "BULLISH" and signal_action == "BUY") or
+         (mtf_direction == "BEARISH" and signal_action == "SELL"))
+    )
+    # Facteur de reduction des malus quand MTF macro confirme
+    mtf_malus_factor = 0.6 if mtf_strong_aligned else 1.0
+
+    # ══════════════════════════════════════════════════════
     # 1. SCORE DE BASE = orderflow_score
     # ══════════════════════════════════════════════════════
 
@@ -111,25 +126,29 @@ def calculate_final_score(
     fatigue_state = str(fatigue_result.get('market_state', 'UNKNOWN')).upper()
 
     if fatigue_state == 'EXHAUSTED':
-        fatigue_impact = -25.0
-        malus_total += 25.0
-        adjustments.append(f"MALUS_FATIGUE_EXHAUSTED: -25 (marche epuise)")
+        raw_malus = 25.0 * mtf_malus_factor
+        fatigue_impact = -raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_FATIGUE_EXHAUSTED: -{raw_malus:.0f} (marche epuise{' [MTF reduit]' if mtf_strong_aligned else ''})")
     elif fatigue_state == 'FATIGUED':
-        fatigue_impact = -15.0
-        malus_total += 15.0
-        adjustments.append(f"MALUS_FATIGUE: -15 (marche fatigue)")
+        raw_malus = 15.0 * mtf_malus_factor
+        fatigue_impact = -raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_FATIGUE: -{raw_malus:.0f} (marche fatigue{' [MTF reduit]' if mtf_strong_aligned else ''})")
 
     # Fatigue directionnelle supplementaire
     buyer_fatigue = fatigue_result.get('buyer_fatigue', {})
     seller_fatigue = fatigue_result.get('seller_fatigue', {})
     if buyer_fatigue.get('fatigue_level') == 'HIGH' and signal_action == 'BUY':
-        fatigue_impact -= 10.0
-        malus_total += 10.0
-        adjustments.append("MALUS_BUYER_FATIGUE: -10 (acheteurs epuises + signal BUY)")
+        raw_malus = 10.0 * mtf_malus_factor
+        fatigue_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_BUYER_FATIGUE: -{raw_malus:.0f} (acheteurs epuises + signal BUY)")
     if seller_fatigue.get('fatigue_level') == 'HIGH' and signal_action == 'SELL':
-        fatigue_impact -= 10.0
-        malus_total += 10.0
-        adjustments.append("MALUS_SELLER_FATIGUE: -10 (vendeurs epuises + signal SELL)")
+        raw_malus = 10.0 * mtf_malus_factor
+        fatigue_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_SELLER_FATIGUE: -{raw_malus:.0f} (vendeurs epuises + signal SELL)")
 
     # ══════════════════════════════════════════════════════
     # 3. MALUS PHYSICS (NOUVEAU — auparavant deconnecte)
@@ -141,25 +160,29 @@ def calculate_final_score(
     barriers = physics_result.get('energy_barriers', {})
 
     if energy.get('energy_deficit'):
-        physics_impact -= 20.0
-        malus_total += 20.0
-        adjustments.append("MALUS_PHYSICS_DEFICIT: -20 (energie insuffisante)")
+        raw_malus = 20.0 * mtf_malus_factor
+        physics_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_PHYSICS_DEFICIT: -{raw_malus:.0f} (energie insuffisante{' [MTF reduit]' if mtf_strong_aligned else ''})")
 
     entropy_state = str(entropy.get('market_state', '')).upper()
     if entropy_state == 'CHAOTIC':
-        physics_impact -= 15.0
-        malus_total += 15.0
-        adjustments.append("MALUS_PHYSICS_CHAOS: -15 (entropie chaotique)")
+        raw_malus = 15.0 * mtf_malus_factor
+        physics_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_PHYSICS_CHAOS: -{raw_malus:.0f} (entropie chaotique{' [MTF reduit]' if mtf_strong_aligned else ''})")
 
     # Barriere proche dans la direction du trade
     if signal_action == 'BUY' and barriers.get('distance_to_resistance_pct', 999) < 0.001:
-        physics_impact -= 10.0
-        malus_total += 10.0
-        adjustments.append("MALUS_BARRIER_UP: -10 (resistance < 1 pip)")
+        raw_malus = 10.0 * mtf_malus_factor
+        physics_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_BARRIER_UP: -{raw_malus:.0f} (resistance < 1 pip)")
     elif signal_action == 'SELL' and barriers.get('distance_to_support_pct', 999) < 0.001:
-        physics_impact -= 10.0
-        malus_total += 10.0
-        adjustments.append("MALUS_BARRIER_DOWN: -10 (support < 1 pip)")
+        raw_malus = 10.0 * mtf_malus_factor
+        physics_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_BARRIER_DOWN: -{raw_malus:.0f} (support < 1 pip)")
 
     # ══════════════════════════════════════════════════════
     # 4. BONUS PHYSICS (NOUVEAU)
@@ -211,6 +234,7 @@ def calculate_final_score(
     # ══════════════════════════════════════════════════════
     # 7. BONUS MTF (migre depuis PMA)
     # ══════════════════════════════════════════════════════
+    # 18 FEV 2026: MTF EST ROI — bonus augmentes car le MTF DECIDE
     if mtf_verdict is not None:
         alignment_count = getattr(mtf_verdict, 'alignment_count', 0)
         mtf_aligned = (
@@ -219,14 +243,14 @@ def calculate_final_score(
         )
         if mtf_aligned:
             if alignment_count == 4:
-                mtf_impact = 15.0
-                bonus_total += 15.0
-                adjustments.append(f"BONUS_MTF_4/4: +15 (alignement parfait {mtf_direction})")
+                mtf_impact = 30.0
+                bonus_total += 30.0
+                adjustments.append(f"BONUS_MTF_4/4: +30 (alignement parfait {mtf_direction})")
             elif alignment_count == 3:
-                mtf_impact = 10.0
-                bonus_total += 10.0
+                mtf_impact = 20.0
+                bonus_total += 20.0
                 alignment_str = getattr(mtf_verdict, 'alignment', '3/4')
-                adjustments.append(f"BONUS_MTF_3/4: +10 (alignement {alignment_str} {mtf_direction})")
+                adjustments.append(f"BONUS_MTF_3/4: +20 (alignement {alignment_str} {mtf_direction})")
 
     # ══════════════════════════════════════════════════════
     # 8. BONUS FRESH LEVEL (migre depuis PMA)
