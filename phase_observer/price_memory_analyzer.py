@@ -1181,6 +1181,11 @@ class PriceMemoryAnalyzer:
         # M30 BEARISH + M15 BULLISH = -0.40+0.30 = -0.10 → NEUTRAL (conflit haut TF)
         WEIGHTED_THRESHOLD = 0.20
 
+        # 19 FEV 2026: FIX precision flottante
+        # -0.40+0.30+0.20+0.10 = 0.19999999999999998 en IEEE 754
+        # Sans round(), score=0.20 devenait NEUTRAL au lieu de BULLISH
+        weighted_score = round(weighted_score, 10)
+
         if weighted_score >= WEIGHTED_THRESHOLD:
             direction = "BULLISH"
             alignment_count = bullish_count
