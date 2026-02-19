@@ -939,7 +939,7 @@ class DecisionPipeline:
         # ════════════════════════════════════════════════════════════
         blocked_phases_config = scalping_config_global.get("entry_rules", {}).get("scalping", {}).get("blocked_phases", {})
         blocked_phases_enabled = blocked_phases_config.get("enabled", True)
-        blocked_phases_list = blocked_phases_config.get("phases", ["range", "accumulation", "range_accumulation", "range_distribution"])
+        blocked_phases_list = blocked_phases_config.get("phases", ["range", "accumulation", "range_accumulation", "range_distribution", "transitional", "consolidation", "compression"])
 
         latest_candle = market_results.get("latest", {})
         current_regime = latest_candle.get("regime", "unknown")
