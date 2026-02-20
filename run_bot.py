@@ -2098,9 +2098,10 @@ def scalping_worker(
                                 )
                                 mtf_bonus = mtf_verdict.bonus
 
-                                # 20 FEV 2026: MTF ALL-IN — tous les TF doivent être alignés (4/4)
-                                # Si alignment_count < 4 → NEUTRAL → pas de trade
-                                if mtf_verdict.alignment_count == 4:
+                                # 20 FEV 2026: MTF ALL-IN — tous les TF doivent être alignés (3/3)
+                                # M30 supprimé — scalping sur M15+M5+M1 uniquement
+                                # Si alignment_count < 3 → NEUTRAL → pas de trade
+                                if mtf_verdict.alignment_count == 3:
                                     mtf_direction = mtf_verdict.direction
                                 else:
                                     mtf_direction = "NEUTRAL"

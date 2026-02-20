@@ -941,7 +941,6 @@ class PriceMemoryAnalyzer:
         """Initialise l'historique pour un asset s'il n'existe pas"""
         if asset not in self._mtf_history:
             self._mtf_history[asset] = {
-                'M30': deque(maxlen=self._history_maxlen),
                 'M15': deque(maxlen=self._history_maxlen),
                 'M5': deque(maxlen=self._history_maxlen),
                 'M1': deque(maxlen=self._history_maxlen)
@@ -976,12 +975,11 @@ class PriceMemoryAnalyzer:
         """
         self._init_asset_history(asset)
 
-        # Lookback par timeframe : mouvement net sur N bougies FERMÉES
-        # M30: 3 bougies = 1h30 de contexte macro
-        # M15: 4 bougies = 1h de direction confirmée
+        # 20 FEV 2026: MTF scalping — M30 supprimé, lookback adapté scalping
+        # M15: 2 bougies = 30min de direction
         # M5:  5 bougies = 25min de momentum
         # M1:  5 bougies = 5min de micro-tendance
-        LOOKBACK_MAP = {'M30': 3, 'M15': 4, 'M5': 5, 'M1': 5}
+        LOOKBACK_MAP = {'M15': 2, 'M5': 5, 'M1': 5}
         lookback = LOOKBACK_MAP.get(timeframe, 5)
 
         if candles is None or len(candles) < 2:
@@ -1081,14 +1079,10 @@ class PriceMemoryAnalyzer:
         """
         self._init_asset_history(asset)
 
-        # Analyser chaque timeframe
-        m30_result = None
+        # 20 FEV 2026: M30 SUPPRIMÉ — scalping sur M15+M5+M1 uniquement
         m15_result = None
         m5_result = None
         m1_result = None
-
-        if candles_m30 is not None and len(candles_m30) >= 1:
-            m30_result = self.analyze_single_timeframe(asset, 'M30', candles_m30, current_price)
 
         if candles_m15 is not None and len(candles_m15) >= 1:
             m15_result = self.analyze_single_timeframe(asset, 'M15', candles_m15, current_price)
@@ -1102,11 +1096,7 @@ class PriceMemoryAnalyzer:
         # Extraire les directions
         available_directions = []
 
-        if m30_result:
-            m30_dir = m30_result.direction
-            available_directions.append(m30_dir)
-        else:
-            m30_dir = 'NO_DATA'
+        m30_dir = 'NO_DATA'  # M30 supprimé
 
         if m15_result:
             m15_dir = m15_result.direction
@@ -1126,64 +1116,41 @@ class PriceMemoryAnalyzer:
         else:
             m1_dir = 'NO_DATA'
 
-        # Compter uniquement les TF avec données
-        total_available = len(available_directions)
         bearish_count = sum(1 for d in available_directions if d == 'BEARISH')
         bullish_count = sum(1 for d in available_directions if d == 'BULLISH')
 
-        # --- 12 FEV 2026: PONDÉRATION M30>M15>M5>M1 (direction macro imposée) ---
-        # M30 = 40% (contexte macro dominant)
-        # M15 = 30% (direction confirmée)
-        # M5  = 20% (momentum court)
-        # M1  = 10% (bruit, poids minimal)
-        # M30+M15 bearish = -0.70 → TOUJOURS BEARISH même si M5+M1 bullish (+0.30)
+        # 20 FEV 2026: PONDÉRATION M15>M5>M1 (M30 supprimé)
+        # M15 = 50% (direction principale scalping)
+        # M5  = 30% (momentum)
+        # M1  = 20% (micro-tendance)
         direction = 'NEUTRAL'
         alignment_count = 0
 
-        weight_m30 = 0.40
-        weight_m15 = 0.30
-        weight_m5 = 0.20
-        weight_m1 = 0.10
+        weight_m15 = 0.50
+        weight_m5 = 0.30
+        weight_m1 = 0.20
 
-        weighted_score = 0.0  # positif = BULLISH, négatif = BEARISH
-        total_weight = 0.0
-
-        if m30_result and m30_result.direction != "NO_DATA":
-            if m30_result.direction == "BULLISH":
-                weighted_score += weight_m30
-            elif m30_result.direction == "BEARISH":
-                weighted_score -= weight_m30
-            total_weight += weight_m30
+        weighted_score = 0.0
 
         if m15_result and m15_result.direction != "NO_DATA":
             if m15_result.direction == "BULLISH":
                 weighted_score += weight_m15
             elif m15_result.direction == "BEARISH":
                 weighted_score -= weight_m15
-            total_weight += weight_m15
 
         if m5_result and m5_result.direction != "NO_DATA":
             if m5_result.direction == "BULLISH":
                 weighted_score += weight_m5
             elif m5_result.direction == "BEARISH":
                 weighted_score -= weight_m5
-            total_weight += weight_m5
 
         if m1_result and m1_result.direction != "NO_DATA":
             if m1_result.direction == "BULLISH":
                 weighted_score += weight_m1
             elif m1_result.direction == "BEARISH":
                 weighted_score -= weight_m1
-            total_weight += weight_m1
 
-        # Seuil de décision: score pondéré >= 0.20 pour direction claire
-        # M30+M15 BEARISH = -0.70 → BEARISH même si M5+M1 BULLISH (-0.70+0.30 = -0.40)
-        # M30 BEARISH + M15 BULLISH = -0.40+0.30 = -0.10 → NEUTRAL (conflit haut TF)
         WEIGHTED_THRESHOLD = 0.20
-
-        # 19 FEV 2026: FIX precision flottante
-        # -0.40+0.30+0.20+0.10 = 0.19999999999999998 en IEEE 754
-        # Sans round(), score=0.20 devenait NEUTRAL au lieu de BULLISH
         weighted_score = round(weighted_score, 10)
 
         if weighted_score >= WEIGHTED_THRESHOLD:
@@ -1200,36 +1167,29 @@ class PriceMemoryAnalyzer:
             self.logger.info(
                 f"[MTF_WEIGHTED][{asset}] Score pondéré: {weighted_score:+.2f} "
                 f"(seuil={WEIGHTED_THRESHOLD}) → {direction} | "
-                f"M30:{m30_dir} M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
+                f"M15:{m15_dir} M5:{m5_dir} M1:{m1_dir}"
             )
 
-        alignment = f"{alignment_count}/4"
+        alignment = f"{alignment_count}/3"
 
-        # Bonus proportionnel (12 FEV 2026: adapté pour 4 TFs)
-        if alignment_count == 4:
+        # Bonus pour 3 TFs
+        if alignment_count == 3:
             bonus = 30.0
-        elif alignment_count == 3:
-            bonus = 20.0
         elif alignment_count == 2:
-            bonus = 10.0
+            bonus = 15.0
         elif alignment_count == 1:
             bonus = 5.0
         else:
             bonus = 0.0
 
         should_override_delta = (direction == 'BEARISH')
-        confidence = alignment_count / 4.0 if alignment_count > 0 else 0.1
+        confidence = alignment_count / 3.0 if alignment_count > 0 else 0.1
 
         if self.logger:
             self.logger.debug(f"[MTF_BONUS] {direction} {alignment} → +{bonus:.0f} pts")
 
         # Construire le détail
         details = {
-            'm30': {
-                'direction': m30_dir,
-                'net_pips': m30_result.net_pips if m30_result else 0.0,
-                'clarity': m30_result.trend_clarity if m30_result else 0.0
-            },
             'm15': {
                 'direction': m15_dir,
                 'net_pips': m15_result.net_pips if m15_result else 0.0,
@@ -1249,7 +1209,6 @@ class PriceMemoryAnalyzer:
             'bullish_count': bullish_count,
             'weighted_score': weighted_score,
             'history_size': {
-                'M30': len(self._mtf_history[asset]['M30']),
                 'M15': len(self._mtf_history[asset]['M15']),
                 'M5': len(self._mtf_history[asset]['M5']),
                 'M1': len(self._mtf_history[asset]['M1'])
@@ -1288,7 +1247,7 @@ class PriceMemoryAnalyzer:
             self.logger.info(
                 f"{emoji} [MTF_VERDICT][{asset}] "
                 f"{direction} ({alignment}) | "
-                f"M30:{_tf_display(m30_dir)} M15:{_tf_display(m15_dir)} M5:{_tf_display(m5_dir)} M1:{_tf_display(m1_dir)} | "
+                f"M15:{_tf_display(m15_dir)} M5:{_tf_display(m5_dir)} M1:{_tf_display(m1_dir)} | "
                 f"Bonus: {bonus:+.0f} pts"
             )
 
