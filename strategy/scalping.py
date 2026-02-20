@@ -1070,23 +1070,13 @@ class ScalpingStrategy(BaseStrategy):
 
             # --- MTF NEUTRAL → delta decide ---
             else:
-                if delta_direction == "bullish":
-                    result["bias"] = "BUY"
-                    self.logger.info(
-                        f"[MTF_QUEEN][{asset}] BUY - MTF=NEUTRAL, delta bullish "
-                        f"(imb={delta_imbalance:.2f}) → pas de bonus MTF"
-                    )
-                elif delta_direction == "bearish":
-                    result["bias"] = "SELL"
-                    self.logger.info(
-                        f"[MTF_QUEEN][{asset}] SELL - MTF=NEUTRAL, delta bearish "
-                        f"(imb={delta_imbalance:.2f}) → pas de bonus MTF"
-                    )
-                else:
-                    result["bias"] = "NEUTRAL"
-                    self.logger.debug(
-                        f"[MTF_QUEEN][{asset}] NEUTRAL - MTF=NEUTRAL, delta=neutral"
-                    )
+                # 20 FEV 2026: MTF ALL-IN — TF non alignés (< 4/4) → pas de trade
+                # Delta ignoré : pas de direction sans consensus MTF complet
+                result["bias"] = "NEUTRAL"
+                self.logger.info(
+                    f"[MTF_QUEEN][{asset}] NEUTRAL - MTF non aligné (4/4 requis) "
+                    f"delta={delta_direction} ignoré"
+                )
 
             # 🔧 FIX (03 JAN 2026): Calculer variables pour logs (compatibilité ancien système binaire)
             liquid = volume_confirmation_score >= 10.0

@@ -2097,7 +2097,13 @@ def scalping_worker(
                                     current_price=current_price_for_mtf
                                 )
                                 mtf_bonus = mtf_verdict.bonus
-                                mtf_direction = mtf_verdict.direction
+
+                                # 20 FEV 2026: MTF ALL-IN — tous les TF doivent être alignés (4/4)
+                                # Si alignment_count < 4 → NEUTRAL → pas de trade
+                                if mtf_verdict.alignment_count == 4:
+                                    mtf_direction = mtf_verdict.direction
+                                else:
+                                    mtf_direction = "NEUTRAL"
 
                                 mtf_emoji = "🐻" if mtf_direction == "BEARISH" else ("🐂" if mtf_direction == "BULLISH" else "⚖️")
                                 logger.info(
