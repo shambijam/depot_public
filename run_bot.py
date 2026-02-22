@@ -1790,7 +1790,6 @@ def scalping_worker(
 
             # ✅ PHASE 2: Import cache multi-niveaux
             from core.bars_cache import bars_cache
-            from phase_observer.regime_resolver import regime_resolver
 
             # ✅ PHASE 2: Utiliser cache barres (30 barres au lieu de 200)
             # 95% du temps: récupère 1 barre seulement (bougie courante)
