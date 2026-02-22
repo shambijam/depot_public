@@ -2109,7 +2109,7 @@ def scalping_worker(
                                 mtf_emoji = "🐻" if mtf_direction == "BEARISH" else ("🐂" if mtf_direction == "BULLISH" else "⚖️")
                                 logger.info(
                                     f"{mtf_emoji} [MTF_VERDICT][{asset}] {mtf_direction} ({mtf_verdict.alignment}) | "
-                                    f"M30:{mtf_verdict.m30_direction} M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
+                                    f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
                                     f"Bonus: {mtf_bonus:+.0f} pts | Confidence: {mtf_verdict.confidence:.2f}"
                                 )
                             else:
@@ -2674,23 +2674,27 @@ def scalping_worker(
                             if score_final_for_sizing >= 85 and alignment_for_sizing == 3 and consensus_for_sizing == "ALIGNED":
                                 risk_multiplier = 1.5
                                 tp_multiplier = 1.3
+                                sl_multiplier = 1.2
                                 sizing_tier = "SETUP_A"
                             elif score_final_for_sizing >= 70:
                                 risk_multiplier = 1.0
                                 tp_multiplier = 1.0
+                                sl_multiplier = 1.0
                                 sizing_tier = "NORMAL"
                             else:
                                 risk_multiplier = 0.75
                                 tp_multiplier = 1.0
+                                sl_multiplier = 1.0
                                 sizing_tier = "REDUCED"
 
                             logger.info(
                                 f"[SIZING_TIER][{asset}] {sizing_tier} | "
                                 f"score={score_final_for_sizing:.0f} | align={alignment_for_sizing}/3 | "
-                                f"consensus={consensus_for_sizing} | risk×{risk_multiplier} | tp×{tp_multiplier}"
+                                f"consensus={consensus_for_sizing} | risk×{risk_multiplier} | tp×{tp_multiplier} | sl×{sl_multiplier}"
                             )
                             td["risk_multiplier"] = risk_multiplier
                             td["tp_multiplier"] = tp_multiplier
+                            td["sl_multiplier"] = sl_multiplier
                             td["sizing_tier"] = sizing_tier
                             # ──────────────────────────────────────────────────────────────────────
 

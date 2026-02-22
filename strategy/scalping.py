@@ -1070,11 +1070,11 @@ class ScalpingStrategy(BaseStrategy):
 
             # --- MTF NEUTRAL → delta decide ---
             else:
-                # 20 FEV 2026: MTF ALL-IN — TF non alignés (< 4/4) → pas de trade
+                # 20 FEV 2026: MTF ALL-IN — TF non alignés (< 3/3) → pas de trade
                 # Delta ignoré : pas de direction sans consensus MTF complet
                 result["bias"] = "NEUTRAL"
                 self.logger.info(
-                    f"[MTF_QUEEN][{asset}] NEUTRAL - MTF non aligné (4/4 requis) "
+                    f"[MTF_QUEEN][{asset}] NEUTRAL - MTF non aligné (3/3 requis) "
                     f"delta={delta_direction} ignoré"
                 )
 

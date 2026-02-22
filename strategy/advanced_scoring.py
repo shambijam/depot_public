@@ -105,7 +105,7 @@ def calculate_final_score(
 
     # ══════════════════════════════════════════════════════
     # 0. DETECTER ALIGNEMENT MTF (18 FEV 2026)
-    # Quand MTF 3/4 ou 4/4 confirme la direction du signal,
+    # Quand MTF 3/3 confirme la direction du signal (M30 supprimé 20 FEV 2026),
     # les malus physics/fatigue sont reduits de 40%
     # car le macro valide malgre le bruit local.
     # ══════════════════════════════════════════════════════
@@ -281,15 +281,12 @@ def calculate_final_score(
             (mtf_direction == "BEARISH" and signal_action == "SELL")
         )
         if mtf_aligned:
-            if alignment_count == 4:
+            if alignment_count == 3:
+                # 22 FEV 2026: M30 supprimé — 3/3 est l'alignement parfait (ex 4/4)
                 mtf_impact = 30.0
                 bonus_total += 30.0
-                adjustments.append(f"BONUS_MTF_4/4: +30 (alignement parfait {mtf_direction})")
-            elif alignment_count == 3:
-                mtf_impact = 20.0
-                bonus_total += 20.0
-                alignment_str = getattr(mtf_verdict, 'alignment', '3/4')
-                adjustments.append(f"BONUS_MTF_3/4: +20 (alignement {alignment_str} {mtf_direction})")
+                alignment_str = getattr(mtf_verdict, 'alignment', '3/3')
+                adjustments.append(f"BONUS_MTF_3/3: +30 (alignement parfait {alignment_str} {mtf_direction})")
 
     # ══════════════════════════════════════════════════════
     # 8. BONUS FRESH LEVEL (migre depuis PMA)

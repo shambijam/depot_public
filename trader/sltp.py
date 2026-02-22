@@ -736,6 +736,20 @@ def _calculate_sl_tp_prices(
         )
     # ─────────────────────────────────────────────────────────────────────
 
+    # ── SL MULTIPLIER Setup A (22 FEV 2026) ──────────────────────────────
+    sl_multiplier_td = float((trade_decision or {}).get("sl_multiplier", 1.0))
+    if sl_multiplier_td != 1.0 and stop_loss_price is not None:
+        _base_sl = stop_loss_price
+        extra_dist = abs(stop_loss_price - entry_price) * (sl_multiplier_td - 1.0)
+        stop_loss_price = (
+            stop_loss_price - extra_dist if action == "BUY" else stop_loss_price + extra_dist
+        )
+        logger.info(
+            f"[SLTP_TIER] sl_multiplier=×{sl_multiplier_td:.2f} | "
+            f"SL: {_base_sl:.5f} → {stop_loss_price:.5f}"
+        )
+    # ─────────────────────────────────────────────────────────────────────
+
     # ---------- 8) Distances brutes (prix) ----------
     sl_dist_price = (
         (entry_price - stop_loss_price)
