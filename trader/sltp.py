@@ -722,6 +722,20 @@ def _calculate_sl_tp_prices(
         else:
             take_profit_price = None  # trailing-only
 
+    # ── TP MULTIPLIER Setup A (21 FEV 2026) ──────────────────────────────
+    tp_multiplier_td = float((trade_decision or {}).get("tp_multiplier", 1.0))
+    if tp_multiplier_td != 1.0 and take_profit_price is not None:
+        _base_tp = take_profit_price
+        extra_dist = abs(take_profit_price - entry_price) * (tp_multiplier_td - 1.0)
+        take_profit_price = (
+            take_profit_price + extra_dist if action == "BUY" else take_profit_price - extra_dist
+        )
+        logger.info(
+            f"[SLTP_TIER] tp_multiplier=×{tp_multiplier_td:.2f} | "
+            f"TP: {_base_tp:.5f} → {take_profit_price:.5f}"
+        )
+    # ─────────────────────────────────────────────────────────────────────
+
     # ---------- 8) Distances brutes (prix) ----------
     sl_dist_price = (
         (entry_price - stop_loss_price)

@@ -1273,6 +1273,8 @@ class DecisionPipeline:
                 current_price=current_price,
                 current_regime=current_regime,
                 inst_veto_fatigue=inst_veto_fatigue,
+                delta_direction=orderflow_result_mini.get("delta_momentum_details", {}).get("direction", "neutral"),
+                delta_momentum_score=float(orderflow_result_mini.get("delta_momentum_score", 0.0)),
                 asset=asset,
                 logger_ref=_log,
             )

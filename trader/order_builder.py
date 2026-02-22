@@ -882,6 +882,18 @@ def _prepare_order_sequential(self, decision_package: dict) -> dict:
         account_trade_settings_over["risk_per_trade_percent"] = resolved_risk_pct
         account_trade_settings_over["equity"] = equity_val  # ⬅ OBLIGATOIRE
 
+        # ── SIZING ASYMÉTRIQUE — Appliquer multiplicateur ────────────────────
+        risk_multiplier_td = float(trade_decision.get("risk_multiplier", 1.0))
+        if risk_multiplier_td != 1.0:
+            _base_risk = resolved_risk_pct
+            resolved_risk_pct = round(resolved_risk_pct * risk_multiplier_td, 4)
+            account_trade_settings_over["risk_per_trade_percent"] = resolved_risk_pct
+            self.logger.info(
+                f"[SIZING_TIER] {trade_decision.get('sizing_tier', 'NORMAL')} | "
+                f"risk: {_base_risk:.3f}% × {risk_multiplier_td:.2f} = {resolved_risk_pct:.3f}%"
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         # 📊 LOG: Payload final transmis à sizing.py
         self.logger.critical("=" * 80)
         self.logger.critical("📦 [PAYLOAD_SIZING] Payload final transmis à _calculate_risk_based_volume:")

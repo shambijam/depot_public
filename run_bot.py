@@ -2143,7 +2143,9 @@ def scalping_worker(
                         orderflow_result_mini = {
                             "score": of_v6_result.get("total_score", 0.0),
                             "bias": of_v6_result.get("bias", "NEUTRAL"),
-                            "summary": of_v6_result
+                            "summary": of_v6_result,
+                            "delta_momentum_score": of_v6_result.get("delta_momentum_score", 0.0),
+                            "delta_momentum_details": of_v6_result.get("delta_momentum_details", {}),
                         }
 
                         logger.info(
@@ -2663,6 +2665,34 @@ def scalping_worker(
                                 "symbol": asset,
                             }
                             td["trade"] = {"action": side, "side": side}
+
+                            # ── SIZING ASYMÉTRIQUE (21 FEV 2026) ──────────────────────────────────
+                            score_final_for_sizing = fusion_out.get("price_memory", {}).get("score_ajuste", 0.0)
+                            consensus_for_sizing = fusion_out.get("price_memory", {}).get("scoring_components", {}).get("consensus", "SPLIT")
+                            alignment_for_sizing = getattr(mtf_verdict, 'alignment_count', 0) if mtf_verdict else 0
+
+                            if score_final_for_sizing >= 85 and alignment_for_sizing == 3 and consensus_for_sizing == "ALIGNED":
+                                risk_multiplier = 1.5
+                                tp_multiplier = 1.3
+                                sizing_tier = "SETUP_A"
+                            elif score_final_for_sizing >= 70:
+                                risk_multiplier = 1.0
+                                tp_multiplier = 1.0
+                                sizing_tier = "NORMAL"
+                            else:
+                                risk_multiplier = 0.75
+                                tp_multiplier = 1.0
+                                sizing_tier = "REDUCED"
+
+                            logger.info(
+                                f"[SIZING_TIER][{asset}] {sizing_tier} | "
+                                f"score={score_final_for_sizing:.0f} | align={alignment_for_sizing}/3 | "
+                                f"consensus={consensus_for_sizing} | risk×{risk_multiplier} | tp×{tp_multiplier}"
+                            )
+                            td["risk_multiplier"] = risk_multiplier
+                            td["tp_multiplier"] = tp_multiplier
+                            td["sizing_tier"] = sizing_tier
+                            # ──────────────────────────────────────────────────────────────────────
 
                             # Package décision - ✅ UTILISER ctx (market context local)
                             with context_lock:

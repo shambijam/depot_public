@@ -49,6 +49,8 @@ def calculate_final_score(
     inst_veto_fatigue: bool,
     # Meta
     asset: str,
+    delta_direction: str = "neutral",
+    delta_momentum_score: float = 0.0,
     logger_ref=None,
 ) -> dict:
     """
@@ -239,6 +241,28 @@ def calculate_final_score(
                 malus_total += 10.0
                 adjustments.append(f"MALUS_IRD_OPPOSE: -10 (Score={inst_score:.0f}, Trend={inst_trend} CONTRE {signal_action})")
 
+    # ── Bonus divergence CVD dédiée (layer ADVANCED_DIVERGENCE_*) ────────
+    if inst_result:
+        for _layer in inst_result.get("signals_breakdown", []):
+            _layer_name = str(_layer.get("name", "")).upper()
+            if "DIVERGENCE" in _layer_name:
+                _layer_dir = str(_layer.get("direction", "NEUTRAL")).upper()
+                _meta = _layer.get("metadata", {})
+                _regular = _meta.get("regular", {})
+                if _regular.get("detected", False) and _layer_dir in ("BULLISH", "BEARISH"):
+                    _div_aligned = (
+                        (_layer_dir == "BULLISH" and signal_action == "BUY") or
+                        (_layer_dir == "BEARISH" and signal_action == "SELL")
+                    )
+                    if _div_aligned:
+                        ird_impact += 12.0
+                        bonus_total += 12.0
+                        adjustments.append(
+                            f"BONUS_CVD_DIVERGENCE: +12 (layer={_layer.get('name')}, dir={_layer_dir})"
+                        )
+                break  # une seule divergence comptée
+    # ─────────────────────────────────────────────────────────────────────
+
     # ══════════════════════════════════════════════════════
     # 6. MALUS IRD FATIGUE (migre depuis PMA)
     # ══════════════════════════════════════════════════════
@@ -338,6 +362,29 @@ def calculate_final_score(
         else:
             adjustments.append(
                 f"REGIME_EXCEPTION: IRD reversal {inst_result.get('conviction_level', 'N/A')} → malus regime annule"
+            )
+
+    # ══════════════════════════════════════════════════════
+    # 11b. BONUS/MALUS DELTA DIRECTION — CVD slope (21 FEV 2026)
+    # Equivalent au "cvd_slope accélérateur" des rapports doctrinaux.
+    # Condition: delta fort (score >= 12) dans le sens du signal → +8
+    #            delta fort opposé au signal → -5
+    # ══════════════════════════════════════════════════════
+    delta_dir_upper = str(delta_direction).upper()
+    delta_strong = delta_momentum_score >= 12.0
+
+    if delta_strong:
+        if (delta_dir_upper == "BULLISH" and signal_action == "BUY") or \
+           (delta_dir_upper == "BEARISH" and signal_action == "SELL"):
+            bonus_total += 8.0
+            adjustments.append(
+                f"BONUS_DELTA_MOMENTUM: +8 (delta={delta_dir_upper} aligné, score={delta_momentum_score:.0f})"
+            )
+        elif (delta_dir_upper == "BULLISH" and signal_action == "SELL") or \
+             (delta_dir_upper == "BEARISH" and signal_action == "BUY"):
+            malus_total += 5.0
+            adjustments.append(
+                f"MALUS_DELTA_OPPOSE: -5 (delta={delta_dir_upper} CONTRE {signal_action}, score={delta_momentum_score:.0f})"
             )
 
     # ══════════════════════════════════════════════════════
