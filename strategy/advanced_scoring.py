@@ -152,6 +152,28 @@ def calculate_final_score(
         malus_total += raw_malus
         adjustments.append(f"MALUS_SELLER_FATIGUE: -{raw_malus:.0f} (vendeurs epuises + signal SELL)")
 
+    # Momentum fatigue (ATR / volume / body size décroissants)
+    momentum_fatigue = fatigue_result.get('momentum_fatigue', {})
+    if momentum_fatigue.get('fatigue_level') == 'HIGH':
+        raw_malus = 15.0 * mtf_malus_factor
+        fatigue_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_MOMENTUM_FATIGUE: -{raw_malus:.0f} (momentum epuise: ATR/volume/body decroissants{' [MTF reduit]' if mtf_strong_aligned else ''})")
+
+    # Absorption: prix stagne malgré volume dans le sens du signal
+    buyer_absorption = any("Absorption forte" in r for r in buyer_fatigue.get('reasons', []))
+    seller_absorption = any("Absorption forte" in r for r in seller_fatigue.get('reasons', []))
+    if buyer_absorption and signal_action == 'BUY':
+        raw_malus = 20.0 * mtf_malus_factor
+        fatigue_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_ABSORPTION: -{raw_malus:.0f} (absorption: prix stagne malgre achats)")
+    elif seller_absorption and signal_action == 'SELL':
+        raw_malus = 20.0 * mtf_malus_factor
+        fatigue_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_ABSORPTION: -{raw_malus:.0f} (absorption: prix stagne malgre ventes)")
+
     # ══════════════════════════════════════════════════════
     # 3. MALUS PHYSICS (NOUVEAU — auparavant deconnecte)
     # ══════════════════════════════════════════════════════
@@ -185,6 +207,18 @@ def calculate_final_score(
         physics_impact -= raw_malus
         malus_total += raw_malus
         adjustments.append(f"MALUS_BARRIER_DOWN: -{raw_malus:.0f} (support < 1 pip)")
+
+    # Énergie requise pour franchir la barrière vs énergie disponible
+    average_energy = energy.get('average_energy', 0.0)
+    if average_energy > 0:
+        energy_required = barriers.get(
+            'energy_required_up' if signal_action == 'BUY' else 'energy_required_down', 0.0
+        )
+        if energy_required > average_energy * 2:
+            raw_malus = 10.0 * mtf_malus_factor
+            physics_impact -= raw_malus
+            malus_total += raw_malus
+            adjustments.append(f"MALUS_ENERGY_BARRIER: -{raw_malus:.0f} (energie requise x2 vs moyenne)")
 
     # ══════════════════════════════════════════════════════
     # 4. BONUS PHYSICS (NOUVEAU)
@@ -510,6 +544,10 @@ def calculate_score_integrated(
         "rescue_level": rescue_level,
         "rescue_kind": "none" if rescue_level == 0 else ("soft" if rescue_level == 1 else "hard"),
         "bias": bias,
+        # Métriques brutes exposées pour decision_pipeline (cvd_slope était toujours 0.0)
+        "cvd_slope": float(metrics.get("cvd_slope", 0.0)),
+        "delta": float(metrics.get("delta_total", 0.0)),
+        "vol_ratio": float(metrics.get("vol_ratio", 1.0)),
     }
 
     return of_score, status, summary

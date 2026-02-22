@@ -1108,10 +1108,7 @@ class ScalpingStrategy(BaseStrategy):
                 from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer
                 from phase_observer.market_fatigue_analyzer import MarketFatigueAnalyzer
                 from phase_observer.market_physics_analyzer import MarketPhysicsAnalyzer
-                from phase_observer.microstructure_analyzer import (
-                    MicrostructureAnalyzer,
-                )
-                from phase_observer.liquidity_heatmap import LiquidityHeatmap
+
 
                 institutional_analysis = {}
 
@@ -1285,54 +1282,6 @@ class ScalpingStrategy(BaseStrategy):
                     )
                     institutional_analysis["market_physics"] = {}
 
-                # 4. PHASE 2: Microstructure (vitesse ruban, order imbalance)
-                try:
-                    microstructure = MicrostructureAnalyzer(logger=self.logger)
-                    if ticks_df is not None and len(ticks_df) > 10:
-                        tape_speed = microstructure.analyze_tape_speed(ticks_df)
-                        institutional_analysis["tape_speed"] = tape_speed
-                        self.logger.debug(
-                            f"[{asset}] 🔬 TapeSpeed: {tape_speed.get('interpretation', 'N/A')}, ratio={tape_speed.get('speed_ratio', 0):.2f}"
-                        )
-
-                        # Momentum ignition
-                        ignition = microstructure.detect_momentum_ignition(ticks_df)
-                        if ignition:
-                            institutional_analysis["momentum_ignition"] = ignition[
-                                -1
-                            ]  # Dernier signal
-                            self.logger.debug(
-                                f"[{asset}] 🚀 MomentumIgnition: {ignition[-1].get('side', 'N/A')} strength={ignition[-1].get('strength', 0):.1f}"
-                            )
-                except Exception as e_micro:
-                    self.logger.debug(f"[{asset}] Microstructure error: {e_micro}")
-                    institutional_analysis["tape_speed"] = {}
-
-                # 5. PHASE 2: Liquidity Heatmap (pression buy/sell, liquidity grabs)
-                try:
-                    liquidity_map = LiquidityHeatmap(logger=self.logger)
-                    if ticks_df is not None and len(ticks_df) > 10:
-                        pressure = liquidity_map.calculate_pressure_ratio(
-                            ticks_df, window_seconds=5.0
-                        )
-                        institutional_analysis["pressure_ratio"] = pressure
-                        self.logger.debug(
-                            f"[{asset}] 💧 Pressure: {pressure.get('direction', 'N/A')}, normalized={pressure.get('normalized_pressure', 0):.2f}"
-                        )
-
-                        # Liquidity grabs
-                        grabs = liquidity_map.detect_liquidity_grab(ticks_df)
-                        if grabs:
-                            institutional_analysis["liquidity_grabs"] = grabs
-                            self.logger.debug(
-                                f"[{asset}] 🎯 LiquidityGrab: {grabs[0].get('type', 'N/A')} @ {grabs[0].get('level', 0)}"
-                            )
-                except Exception as e_liquidity:
-                    self.logger.debug(
-                        f"[{asset}] LiquidityHeatmap error: {e_liquidity}"
-                    )
-                    institutional_analysis["pressure_ratio"] = {}
-
                 # Ajouter au résultat final (en parallèle de l'OrderFlow V6 actuel)
                 result["institutional_analysis"] = institutional_analysis
 
@@ -1340,8 +1289,7 @@ class ScalpingStrategy(BaseStrategy):
                     f"[{asset}] 📊 INSTITUTIONAL ANALYSIS: "
                     f"Memory={len(institutional_analysis.get('price_memory', {}).get('memory_signals', []))} | "
                     f"Fatigue={institutional_analysis.get('market_fatigue', {}).get('market_state', 'N/A')} | "
-                    f"Physics={institutional_analysis.get('market_physics', {}).get('physics_bias', 'N/A')} | "
-                    f"Pressure={institutional_analysis.get('pressure_ratio', {}).get('direction', 'N/A')}"
+                    f"Physics={institutional_analysis.get('market_physics', {}).get('physics_bias', 'N/A')}"
                 )
 
             except ImportError as e_import:

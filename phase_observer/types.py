@@ -107,7 +107,6 @@ class MarketFeatures:
     liquidity: Dict[str, Any] = field(default_factory=dict)
     momentum: Dict[str, Any] = field(default_factory=dict)
     session: Dict[str, Any] = field(default_factory=dict)
-    microstructure: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

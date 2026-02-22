@@ -96,9 +96,8 @@ class InstitutionalReversalDetector:
                 "accumulation_weight": 0.25,     # Smart Money Wyckoff - COEUR IRD
                 "pattern_weight": 0.15,          # ML Pattern Recognition
                 "capital_flows_weight": 0.10,    # CVD Capital Flows
-                # DESACTIVES (gere par PMA/MPA) — cles presentes pour eviter KeyError
+                # DESACTIVES (gere par PMA/MPA) — cle presente pour eviter KeyError
                 "fatigue_weight": 0.0,
-                "microstructure_m1_weight": 0.0,
             },
             "thresholds": {
                 "volume_spike": 2.5,       # 250% de la moyenne
@@ -227,10 +226,6 @@ class InstitutionalReversalDetector:
         # ✅ COUCHE 4 : Smart Money Wyckoff (UNIQUE → Garder)
         # C'est le cœur du module institutionnel (Distribution/Accumulation)
         signals.append(self._detect_smart_money_accumulation(market_data))
-
-        # ❌ COUCHE 5 : Microstructure M1 (REDONDANT PMA → Retirer)
-        # PriceMemoryAnalyzer gère mieux les micro-résistances et wicks (freshness)
-        # signals.append(self._analyze_candle_microstructure(market_data))
 
         # ✅ COUCHE 6 : ML Pattern Recognition (UNIQUE → Garder)
         signals.append(self._detect_ml_patterns(market_data))
@@ -835,159 +830,6 @@ class InstitutionalReversalDetector:
     # ═══════════════════════════════════════════════════════════════
     # COUCHE 5 : MICROSTRUCTURE M1 (remplace ticks)
     # ═══════════════════════════════════════════════════════════════
-
-    def _analyze_candle_microstructure(self, market_data: Dict) -> ReversalSignal:
-        """Microstructure sur M1 (sans ticks)"""
-        candles_m1 = market_data.get('candles_m1', pd.DataFrame())
-
-        if len(candles_m1) < 30:
-            return self._empty_signal("MICROSTRUCTURE")
-
-        # 1. Wick exhaustion
-        wick_exhaustion = self._detect_wick_exhaustion_m1(candles_m1)
-
-        # 2. Body/Wick imbalance
-        body_wick_imbalance = self._detect_body_wick_imbalance(candles_m1)
-
-        # 3. Doji clusters
-        doji_patterns = self._detect_doji_clusters(candles_m1)
-
-        # 4. Rejection patterns
-        rejection_patterns = self._detect_rejection_patterns(candles_m1)
-
-        # Score
-        micro_score = 0.0
-        if wick_exhaustion:
-            micro_score += 30.0
-        if body_wick_imbalance:
-            micro_score += 25.0
-        if doji_patterns > 3:
-            micro_score += 25.0
-        if rejection_patterns:
-            micro_score += 20.0
-
-        direction = self._determine_microstructure_direction(candles_m1)
-
-        return ReversalSignal(
-            name="CANDLE_MICROSTRUCTURE",
-            strength=min(100.0, micro_score),
-            confidence=0.65,
-            direction=direction,
-            timestamp=pd.Timestamp.now(),
-            metadata={
-                "wick_exhaustion": wick_exhaustion,
-                "body_wick_imbalance": body_wick_imbalance,
-                "doji_patterns": doji_patterns,
-                "rejection_patterns": rejection_patterns
-            }
-        )
-
-    def _detect_wick_exhaustion_m1(self, candles: pd.DataFrame) -> bool:
-        """Wicks de plus en plus longs (épuisement)"""
-        if len(candles) < 10:
-            return False
-
-        last_10 = candles.tail(10).to_dict('records')
-
-        wick_sizes = []
-        for c in last_10:
-            body = abs(c['close'] - c['open'])
-            upper_wick = c['high'] - max(c['close'], c['open'])
-            lower_wick = min(c['close'], c['open']) - c['low']
-            total_wick = upper_wick + lower_wick
-            wick_sizes.append(total_wick / max(body, 0.0001))
-
-        # Tendance croissante des wicks
-        wick_trend = np.polyfit(range(len(wick_sizes)), wick_sizes, 1)[0]
-
-        return wick_trend > 0.5
-
-    def _detect_body_wick_imbalance(self, candles: pd.DataFrame) -> bool:
-        """Bodies diminuent, wicks augmentent"""
-        if len(candles) < 10:
-            return False
-
-        last_10 = candles.tail(10).to_dict('records')
-
-        body_ratio = []
-        for c in last_10:
-            body = abs(c['close'] - c['open'])
-            total_range = c['high'] - c['low']
-            ratio = body / max(total_range, 0.0001)
-            body_ratio.append(ratio)
-
-        # Bodies décroissants
-        body_trend = np.polyfit(range(len(body_ratio)), body_ratio, 1)[0]
-
-        return body_trend < -0.05
-
-    def _detect_doji_clusters(self, candles: pd.DataFrame) -> int:
-        """Compte les dojis (indécision)"""
-        if len(candles) < 10:
-            return 0
-
-        last_10 = candles.tail(10).to_dict('records')
-
-        doji_count = 0
-        for c in last_10:
-            body = abs(c['close'] - c['open'])
-            total_range = c['high'] - c['low']
-
-            # Doji : body <10% range
-            if total_range > 0 and body < total_range * 0.1:
-                doji_count += 1
-
-        return doji_count
-
-    def _detect_rejection_patterns(self, candles: pd.DataFrame) -> bool:
-        """Long wicks rejettent niveau"""
-        if len(candles) < 5:
-            return False
-
-        last_5 = candles.tail(5).to_dict('records')
-
-        rejections = 0
-        for c in last_5:
-            body = abs(c['close'] - c['open'])
-            upper_wick = c['high'] - max(c['close'], c['open'])
-            lower_wick = min(c['close'], c['open']) - c['low']
-
-            # Rejection haut (wick >3x body)
-            if body > 0 and upper_wick > body * 3:
-                rejections += 1
-            # Rejection bas
-            if body > 0 and lower_wick > body * 3:
-                rejections += 1
-
-        return rejections >= 2
-
-    def _determine_microstructure_direction(self, candles: pd.DataFrame) -> str:
-        """Direction basée sur rejections"""
-        if len(candles) < 5:
-            return "NEUTRAL"
-
-        last_5 = candles.tail(5).to_dict('records')
-
-        upper_rejections = 0
-        lower_rejections = 0
-
-        for c in last_5:
-            body = abs(c['close'] - c['open'])
-            upper_wick = c['high'] - max(c['close'], c['open'])
-            lower_wick = min(c['close'], c['open']) - c['low']
-
-            if body > 0:
-                if upper_wick > body * 2:
-                    upper_rejections += 1
-                if lower_wick > body * 2:
-                    lower_rejections += 1
-
-        if upper_rejections > lower_rejections:
-            return "BEARISH"
-        elif lower_rejections > upper_rejections:
-            return "BULLISH"
-        else:
-            return "NEUTRAL"
 
     # ═══════════════════════════════════════════════════════════════
     # COUCHE 6 : ML PATTERN RECOGNITION
@@ -1657,8 +1499,6 @@ class InstitutionalReversalDetector:
                 weight_key = "fatigue_weight"
             elif "SMART_MONEY" in signal.name:
                 weight_key = "accumulation_weight"
-            elif "MICROSTRUCTURE" in signal.name:
-                weight_key = "microstructure_m1_weight"
             elif "PATTERN" in signal.name or "ML" in signal.name:
                 weight_key = "pattern_weight"
             elif "CAPITAL_FLOWS" in signal.name or "CVD" in signal.name:
