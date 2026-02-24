@@ -1247,7 +1247,13 @@ class DecisionPipeline:
         # ════════════════════════════════════════════════════════════
         # SCORING CENTRALISE (16 FEV 2026 — remplace apply_pma_adjustments)
         # ════════════════════════════════════════════════════════════
-        signal_action = decision_mini.get("action", "HOLD")
+        # FIX A (24 FEV 2026): En BRANCHE 2, le triple filtre peut avoir mis HOLD
+        # dans decision_mini, mais le scoring doit évaluer le signal original (of_bias).
+        # Sans ce fix, le bonus MTF +30 ne fire jamais en BRANCHE 2 (HOLD ≠ BUY/SELL).
+        if is_override and of_bias in ["BUY", "SELL"]:
+            signal_action = of_bias
+        else:
+            signal_action = decision_mini.get("action", "HOLD")
         scoring_result = None
         score_brut = orderflow_score
         score_final = orderflow_score
@@ -1300,7 +1306,7 @@ class DecisionPipeline:
             inst_score_log = f"{inst_score:.0f}" if inst_score else "0"
             _log.info(
                 f"[DECISION_REASON][{asset}] "
-                f"MTF={mtf_direction}({getattr(mtf_verdict, 'alignment_count', 0)}/4) | "
+                f"MTF={mtf_direction}({getattr(mtf_verdict, 'alignment_count', 0)}/3) | "
                 f"IRD={inst_trend_log}(score={inst_score_log}) | "
                 f"OF={orderflow_result_mini.get('bias', 'N/A')}(score={score_brut:.0f}) | "
                 f"Score: {score_brut:.0f}→{score_final:.0f} "
@@ -1367,6 +1373,33 @@ class DecisionPipeline:
                         f"[VETO_REVERSAL_CONFLICT][{asset}] IRD={inst_score:.0f} "
                         f"NEUTRAL+conflit sur {old_action} -> HOLD"
                     )
+
+            # FIX B (24 FEV 2026): BRANCHE 2 — Score override triple filtre
+            # Si le triple filtre a dit HOLD mais que le score final est >= 85,
+            # ET que le MTF est aligné avec le signal, ET qu'aucun veto dur ne s'applique
+            # → le score confirme le setup exceptionnel → on rétablit l'action of_bias.
+            # Ceci corrige le cas où signal_action=BUY mais decision_mini reste HOLD
+            # à cause du triple filtre (F1/F2 fail sur CVD/microstructure).
+            if (is_override and
+                    decision_mini.get("action") == "HOLD" and
+                    not pma_veto_dur and
+                    not inst_veto_reversal and
+                    score_final >= 85.0 and
+                    of_bias in ["BUY", "SELL"] and
+                    mtf_direction in ["BULLISH", "BEARISH"] and
+                    ((of_bias == "BUY" and mtf_direction == "BULLISH") or
+                     (of_bias == "SELL" and mtf_direction == "BEARISH"))):
+                decision_mini["action"] = of_bias
+                decision_mini["confidence"] = min(1.0, score_final / 100.0)
+                decision_mini["rationale"] = (
+                    f"SCORE_OVERRIDE_TRIPLE_FILTER: score={score_final:.1f} >= 85 "
+                    f"+ MTF={mtf_direction}(3/3) confirme {of_bias} | "
+                    f"Bonus: +{pma_bonus:.0f} Malus: -{pma_malus:.0f}"
+                )
+                _log.critical(
+                    f"[SCORE_OVERRIDE][{asset}] Score {score_final:.1f} >= 85 "
+                    f"+ MTF={mtf_direction}(3/3) → Triple filtre HOLD annulé → {of_bias}"
+                )
 
         except Exception as e_scoring:
             _log.error(f"[SCORING][{asset}] Erreur: {e_scoring}", exc_info=True)
