@@ -275,10 +275,15 @@ class MarketFatigueAnalyzer:
             avg_recent_tr = np.mean(recent_tr)
             avg_older_tr = np.mean(older_tr)
 
-            # Si ATR récent < 60% ATR ancien → momentum fatigué
-            if avg_older_tr > 0 and avg_recent_tr < avg_older_tr * 0.6:
-                fatigue_points += 4
-                reasons.append('ATR décroissant (volatilité chute)')
+            # Détection progressive : -30% → +2pts, -50% → +2pts supplémentaires
+            if avg_older_tr > 0:
+                ratio_tr = avg_recent_tr / avg_older_tr
+                if ratio_tr < 0.7:
+                    fatigue_points += 2
+                    reasons.append('ATR décroissant modéré (-30%)')
+                if ratio_tr < 0.5:
+                    fatigue_points += 2
+                    reasons.append('ATR décroissant fort (-50%)')
 
         # 2. Volume décroissant
         volumes = recent_candles['volume'].values
@@ -286,10 +291,15 @@ class MarketFatigueAnalyzer:
             recent_vol = np.mean(volumes[-5:])
             older_vol = np.mean(volumes[-10:-5])
 
-            # Si volume récent < 60% volume ancien
-            if older_vol > 0 and recent_vol < older_vol * 0.6:
-                fatigue_points += 3
-                reasons.append('Volume décroissant')
+            # Détection progressive : -30% → +2pts, -50% → +2pts supplémentaires
+            if older_vol > 0:
+                ratio_vol = recent_vol / older_vol
+                if ratio_vol < 0.7:
+                    fatigue_points += 2
+                    reasons.append('Volume décroissant modéré (-30%)')
+                if ratio_vol < 0.5:
+                    fatigue_points += 2
+                    reasons.append('Volume décroissant fort (-50%)')
 
         # 3. Body size décroissant (bougies de plus en plus petites)
         if len(closes) >= 10:
@@ -309,10 +319,15 @@ class MarketFatigueAnalyzer:
             avg_recent_body = np.mean(recent_bodies)
             avg_older_body = np.mean(older_bodies)
 
-            # Si bodies récents < 50% bodies anciens
-            if avg_older_body > 0 and avg_recent_body < avg_older_body * 0.5:
-                fatigue_points += 3
-                reasons.append('Body size décroissant')
+            # Détection progressive : -30% → +2pts, -50% → +2pts supplémentaires
+            if avg_older_body > 0:
+                ratio_body = avg_recent_body / avg_older_body
+                if ratio_body < 0.7:
+                    fatigue_points += 2
+                    reasons.append('Body size décroissant modéré (-30%)')
+                if ratio_body < 0.5:
+                    fatigue_points += 2
+                    reasons.append('Body size décroissant fort (-50%)')
 
         return {
             'score': min(10, fatigue_points),

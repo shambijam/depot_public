@@ -1516,15 +1516,9 @@ class InstitutionalReversalDetector:
             return 0.0
 
         # Score normalise (0-100) — diviser par max(1.0, total_weight) pour eviter distorsion
-        base_score = (weighted_sum / max(1.0, total_weight))
-
-        # Boost par couches bonus (confluence + flows)
-        bonus_boost = 0.0
-        for signal in signals:
-            if "CONFLUENCE" in signal.name or "FLOWS" in signal.name:
-                bonus_boost += signal.strength * 0.1  # 10% contribution
-
-        final_score = min(100.0, base_score + bonus_boost)
+        # Note: CAPITAL_FLOWS est deja inclus dans weighted_sum via capital_flows_weight
+        # Le bonus_boost precedent double-comptait FLOWS → supprime
+        final_score = min(100.0, weighted_sum / max(1.0, total_weight))
 
         return final_score
 
@@ -1714,15 +1708,24 @@ class InstitutionalReversalDetector:
         }
 
     def _determine_new_trend(self, result: Dict) -> str:
-        """Détermine nouvelle tendance basée sur signaux"""
+        """Détermine nouvelle tendance basée sur signaux (pondéré par force)"""
         signals_breakdown = result.get("signals_breakdown", [])
 
-        bullish_count = sum(1 for s in signals_breakdown if s.get("direction") == "BULLISH" and s.get("strength", 0) > 30)
-        bearish_count = sum(1 for s in signals_breakdown if s.get("direction") == "BEARISH" and s.get("strength", 0) > 30)
+        bullish_weight = 0.0
+        bearish_weight = 0.0
 
-        if bullish_count > bearish_count:
+        for s in signals_breakdown:
+            strength = s.get("strength", 0)
+            direction = s.get("direction", "NEUTRAL")
+            if direction == "BULLISH":
+                bullish_weight += strength
+            elif direction == "BEARISH":
+                bearish_weight += strength
+
+        # Seuil de significativité : 20% de différence pour éviter les faux positifs
+        if bullish_weight > bearish_weight * 1.2:
             return "BULLISH"
-        elif bearish_count > bullish_count:
+        elif bearish_weight > bullish_weight * 1.2:
             return "BEARISH"
         else:
             return "NEUTRAL"

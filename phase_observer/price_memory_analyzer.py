@@ -1321,6 +1321,40 @@ class PriceMemoryAnalyzer:
             'sample_size': total
         }
 
+    def get_mtf_stability(self, asset: str, lookback: int = 5) -> int:
+        """
+        Compte le nombre de cycles consécutifs où M15 est resté dans la même direction.
+
+        Utilisé pour rendre le mtf_malus_factor progressif :
+        - 1  = fraîchement tourné (peu fiable)
+        - 2-3 = stable (fiabilité modérée)
+        - 4+  = très stable (haute confiance dans la tendance)
+
+        Args:
+            asset:   Symbole (USDJPY, USDCHF, etc.)
+            lookback: Nombre max de cycles à remonter
+
+        Returns:
+            int: Nombre de cycles consécutifs (minimum 1)
+        """
+        history = self.get_mtf_history(asset, 'M15', lookback)
+        if not history:
+            return 1
+
+        # get_mtf_history retourne le plus récent en premier
+        current_dir = history[0].direction
+        if current_dir == 'NEUTRAL':
+            return 1
+
+        count = 1
+        for i in range(1, len(history)):
+            if history[i].direction == current_dir:
+                count += 1
+            else:
+                break
+
+        return count
+
     def should_take_bearish_trade(
         self,
         asset: str,

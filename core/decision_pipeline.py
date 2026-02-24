@@ -1276,6 +1276,7 @@ class DecisionPipeline:
                 delta_direction=orderflow_result_mini.get("delta_momentum_details", {}).get("direction", "neutral"),
                 delta_momentum_score=float(orderflow_result_mini.get("delta_momentum_score", 0.0)),
                 asset=asset,
+                point=point,
                 logger_ref=_log,
             )
 
@@ -1323,19 +1324,49 @@ class DecisionPipeline:
                     f"[VETO_DUR][{asset}] Score {score_final:.1f} < {VETO_DUR_THRESHOLD} -> HOLD"
                 )
 
-            # VETO REVERSAL
+            # VETO REVERSAL — Cas 1 : renversement explicitement opposé au signal
             if ird_reversal_opposed and signal_action in ["BUY", "SELL"] and not pma_veto_dur:
                 old_action = decision_mini["action"]
                 decision_mini["action"] = "HOLD"
                 decision_mini["confidence"] = 0.0
                 decision_mini["rationale"] = (
-                    f"VETO_REVERSAL: Renversement institutionnel oppose au signal | "
+                    f"VETO_REVERSAL_OPPOSE: Renversement institutionnel oppose au signal | "
                     f"Original: {old_action}"
                 )
                 inst_veto_reversal = True
                 _log.warning(
                     f"[VETO_REVERSAL][{asset}] IRD oppose au signal {old_action} -> HOLD"
                 )
+
+            # VETO REVERSAL — Cas 2 : score IRD élevé + NEUTRAL = conflit réel
+            # (signaux BULLISH et BEARISH tous deux forts → incertitude institutionnelle)
+            if (not inst_veto_reversal and not pma_veto_dur and
+                    inst_score >= 65 and
+                    (inst_result.get('new_trend', 'NEUTRAL') if inst_result else 'NEUTRAL') == 'NEUTRAL' and
+                    signal_action in ["BUY", "SELL"]):
+                _signals_bd = inst_result.get('signals_breakdown', []) if inst_result else []
+                _has_bullish = any(
+                    s.get('strength', 0) > 40 for s in _signals_bd
+                    if s.get('direction') == 'BULLISH'
+                )
+                _has_bearish = any(
+                    s.get('strength', 0) > 40 for s in _signals_bd
+                    if s.get('direction') == 'BEARISH'
+                )
+                if _has_bullish and _has_bearish:
+                    old_action = decision_mini["action"]
+                    decision_mini["action"] = "HOLD"
+                    decision_mini["confidence"] = 0.0
+                    decision_mini["rationale"] = (
+                        f"VETO_REVERSAL_NEUTRAL_CONFLICT: IRD score={inst_score:.0f} "
+                        f"avec signaux BULLISH+BEARISH forts (conflit) | "
+                        f"Original: {old_action}"
+                    )
+                    inst_veto_reversal = True
+                    _log.warning(
+                        f"[VETO_REVERSAL_CONFLICT][{asset}] IRD={inst_score:.0f} "
+                        f"NEUTRAL+conflit sur {old_action} -> HOLD"
+                    )
 
         except Exception as e_scoring:
             _log.error(f"[SCORING][{asset}] Erreur: {e_scoring}", exc_info=True)

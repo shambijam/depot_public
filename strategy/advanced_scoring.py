@@ -49,6 +49,7 @@ def calculate_final_score(
     inst_veto_fatigue: bool,
     # Meta
     asset: str,
+    point: float = 0.00001,
     delta_direction: str = "neutral",
     delta_momentum_score: float = 0.0,
     logger_ref=None,
@@ -104,10 +105,11 @@ def calculate_final_score(
     micro_res_impact = 0.0
 
     # ══════════════════════════════════════════════════════
-    # 0. DETECTER ALIGNEMENT MTF (18 FEV 2026)
-    # Quand MTF 3/3 confirme la direction du signal (M30 supprimé 20 FEV 2026),
-    # les malus physics/fatigue sont reduits de 40%
-    # car le macro valide malgre le bruit local.
+    # 0. DETECTER ALIGNEMENT MTF + STABILITE (24 FEV 2026)
+    # Le facteur de réduction des malus est maintenant PROGRESSIF
+    # selon le nombre de cycles consécutifs où M15 est resté aligné.
+    # Un MTF fraîchement tourné (1 cycle) = peu fiable → réduction faible (0.9)
+    # Un MTF stable depuis 4+ cycles = haute confiance → réduction forte (0.5)
     # ══════════════════════════════════════════════════════
     mtf_alignment_count = getattr(mtf_verdict, 'alignment_count', 0) if mtf_verdict else 0
     mtf_strong_aligned = (
@@ -115,8 +117,20 @@ def calculate_final_score(
         ((mtf_direction == "BULLISH" and signal_action == "BUY") or
          (mtf_direction == "BEARISH" and signal_action == "SELL"))
     )
-    # Facteur de reduction des malus quand MTF macro confirme
-    mtf_malus_factor = 0.6 if mtf_strong_aligned else 1.0
+    # Facteur progressif basé sur la stabilité M15
+    if mtf_strong_aligned and price_memory_analyzer is not None:
+        try:
+            mtf_stability = price_memory_analyzer.get_mtf_stability(asset, lookback=5)
+        except Exception:
+            mtf_stability = 1
+        if mtf_stability >= 4:
+            mtf_malus_factor = 0.5   # Très stable (4+ cycles) → réduction 50%
+        elif mtf_stability >= 2:
+            mtf_malus_factor = 0.7   # Stable (2-3 cycles) → réduction 30%
+        else:
+            mtf_malus_factor = 0.9   # Fraîchement tourné (1 cycle) → réduction 10%
+    else:
+        mtf_malus_factor = 1.0
 
     # ══════════════════════════════════════════════════════
     # 1. SCORE DE BASE = orderflow_score
@@ -154,11 +168,18 @@ def calculate_final_score(
 
     # Momentum fatigue (ATR / volume / body size décroissants)
     momentum_fatigue = fatigue_result.get('momentum_fatigue', {})
+    momentum_score = momentum_fatigue.get('score', 0)
     if momentum_fatigue.get('fatigue_level') == 'HIGH':
         raw_malus = 15.0 * mtf_malus_factor
         fatigue_impact -= raw_malus
         malus_total += raw_malus
         adjustments.append(f"MALUS_MOMENTUM_FATIGUE: -{raw_malus:.0f} (momentum epuise: ATR/volume/body decroissants{' [MTF reduit]' if mtf_strong_aligned else ''})")
+    elif momentum_score >= 4:
+        # MEDIUM (score 4-5) : décélération modérée détectée mais pas encore HIGH
+        raw_malus = 8.0 * mtf_malus_factor
+        fatigue_impact -= raw_malus
+        malus_total += raw_malus
+        adjustments.append(f"MALUS_MOMENTUM_MEDIUM: -{raw_malus:.0f} (momentum ralentit score={momentum_score:.0f}{' [MTF reduit]' if mtf_strong_aligned else ''})")
 
     # Absorption: prix stagne malgré volume dans le sens du signal
     buyer_absorption = any("Absorption forte" in r for r in buyer_fatigue.get('reasons', []))
@@ -230,6 +251,47 @@ def calculate_final_score(
             physics_impact += 10.0
             bonus_total += 10.0
             adjustments.append(f"BONUS_PHYSICS_INERTIE: +10 (inertie {inertia_dir} alignee)")
+
+    # ══════════════════════════════════════════════════════
+    # 4b. MALUS/BONUS CENTRIPETE (mean reversion)
+    # Prix trop éloigné de la moyenne 20 périodes → risque de retour
+    # ══════════════════════════════════════════════════════
+    centripetal = physics_result.get('centripetal_acceleration', {})
+    if centripetal and centripetal.get('reversal_likely'):
+        distance_pct = centripetal.get('distance_pct', 0.0)
+        current_price_c = centripetal.get('current_price', 0.0)
+        mean_price_c = centripetal.get('mean_price', 0.0)
+
+        # Conversion en pips via point (universel : USDJPY, USDCHF, etc.)
+        if point > 0 and mean_price_c > 0:
+            distance_price = distance_pct * mean_price_c
+            distance_pips = distance_price / point
+        else:
+            distance_pips = 0.0
+
+        # Seuil : 15 pips pour USDJPY (point=0.01), 10 pips pour les autres (point=0.0001)
+        threshold_pips = 15.0 if point >= 0.005 else 10.0
+
+        if distance_pips > threshold_pips:
+            raw_malus = 15.0 * mtf_malus_factor
+            physics_impact -= raw_malus
+            malus_total += raw_malus
+            adjustments.append(
+                f"MALUS_CENTRIPETAL: -{raw_malus:.0f} "
+                f"(prix a {distance_pips:.1f} pips de la moyenne 20p"
+                f"{' [MTF reduit]' if mtf_strong_aligned else ''})"
+            )
+
+        # Bonus si le trade va DANS LE SENS du retour à la moyenne
+        if mean_price_c > 0 and current_price_c > 0:
+            if (current_price_c > mean_price_c and signal_action == "SELL") or \
+               (current_price_c < mean_price_c and signal_action == "BUY"):
+                physics_impact += 8.0
+                bonus_total += 8.0
+                adjustments.append(
+                    f"BONUS_CENTRIPETAL: +8 (trade dans le sens mean reversion "
+                    f"{distance_pips:.1f} pips)"
+                )
 
     # ══════════════════════════════════════════════════════
     # 5. BONUS/FLAG IRD (augmente — avant +10)
