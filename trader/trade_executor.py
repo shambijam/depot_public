@@ -18,7 +18,7 @@ from core.utils import CustomJSONEncoder
 from trader.errors import TradeExecutionError, InvalidDecisionPackageError
 
 # --- Briques (binding en bas du fichier) ---
-from trader.order_builder import prepare_order, _build_mt5_request
+from trader.order_builder import prepare_order, _prepare_order_sequential, _build_mt5_request
 from trader.sizing import _calculate_risk_based_volume
 from trader.sltp import (
     _calculate_sl_tp_prices,
@@ -476,6 +476,7 @@ TradeExecutor._load_settings = _update_internal_position_state.__globals__.get(
     lambda *a, **k: None
 )  # fallback si absent
 TradeExecutor.prepare_order = prepare_order
+TradeExecutor._prepare_order_sequential = _prepare_order_sequential
 TradeExecutor._build_mt5_request = _build_mt5_request
 TradeExecutor._split_multi_tp_orders = _split_multi_tp_orders
 TradeExecutor._calculate_risk_based_volume = _calculate_risk_based_volume
