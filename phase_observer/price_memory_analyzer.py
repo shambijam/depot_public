@@ -976,10 +976,11 @@ class PriceMemoryAnalyzer:
         self._init_asset_history(asset)
 
         # 20 FEV 2026: MTF scalping — M30 supprimé, lookback adapté scalping
-        # M15: 2 bougies = 30min de direction
+        # 26 FEV 2026: M15 passé à 3 bougies = 45min de direction (test stabilité pullback)
+        # M15: 3 bougies = 45min de direction
         # M5:  5 bougies = 25min de momentum
         # M1:  5 bougies = 5min de micro-tendance
-        LOOKBACK_MAP = {'M15': 2, 'M5': 5, 'M1': 5}
+        LOOKBACK_MAP = {'M15': 3, 'M5': 5, 'M1': 5}
         lookback = LOOKBACK_MAP.get(timeframe, 5)
 
         if candles is None or len(candles) < 2:
