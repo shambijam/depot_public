@@ -53,6 +53,7 @@ def calculate_final_score(
     delta_direction: str = "neutral",
     delta_momentum_score: float = 0.0,
     logger_ref=None,
+    ichimoku_result: dict = None,   # 27 FEV 2026
 ) -> dict:
     """
     Calcule le score final en centralisant TOUS les bonus/malus.
@@ -512,7 +513,132 @@ def calculate_final_score(
         adjustments.append(f"BONUS_CONSENSUS_ALIGNED: +15 ({go_count} analyseurs alignes)")
 
     # ══════════════════════════════════════════════════════
-    # 13. CALCUL SCORE FINAL
+    # 13. ICHIMOKU (27 FEV 2026) — coordonné avec IRD, Fatigue, Physics
+    #
+    # Rôle : Ichimoku = RADAR de position (tendance court terme).
+    #        IRD = RADAR de retournement. Physics/Fatigue = état du marché.
+    #
+    # Règles de coordination (éviter les conflits) :
+    #   A) MALUS_OPPOSE exempt si IRD reversal confirmé (≥65) dans la bonne direction
+    #      → En entrée de reversal, le prix est "contre" Ichimoku par définition
+    #   B) BONUS_KIJUN_BOUNCE supprimé si marché EXHAUSTED
+    #      → Rebond sur Kijun lors d'épuisement = piège (dead cat bounce)
+    #   C) BONUS_CROSS supprimé si energy_deficit
+    #      → Croisement Tenkan/Kijun sans énergie = faux signal, non soutenu
+    #
+    # Les zones level >= 2 sont déjà bloquées par ICHIMOKU_ZONE_VETO
+    # dans timing_analyzer avant d'arriver ici.
+    # ══════════════════════════════════════════════════════
+    if ichimoku_result and ichimoku_result.get("available") and signal_action in ("BUY", "SELL"):
+        m5_ich = ichimoku_result.get("m5")
+        m1_ich = ichimoku_result.get("m1")
+
+        # ── Contexte IRD pour coordination (règle A) ────────────────────────
+        # Quand IRD détecte un reversal confirmé (score ≥ 65), le prix peut être
+        # "du mauvais côté" de Ichimoku — c'est justement le point d'entrée d'un reversal.
+        # Le malus OPPOSE ne s'applique pas dans ce cas.
+        _ird_reversal_bullish = (
+            bool(inst_result) and
+            inst_result.get("reversal_detected", False) and
+            inst_score >= 65 and
+            inst_result.get("new_trend") == "BULLISH"
+        )
+        _ird_reversal_bearish = (
+            bool(inst_result) and
+            inst_result.get("reversal_detected", False) and
+            inst_score >= 65 and
+            inst_result.get("new_trend") == "BEARISH"
+        )
+
+        # ── Contexte Fatigue + Physics pour conditions bonus (règles B & C) ──
+        _exhausted = (fatigue_state == "EXHAUSTED")
+        _energy_ok = not energy.get("energy_deficit", False)
+
+        if m5_ich:
+            pos_m5 = m5_ich.get("position", "")
+            cross = m5_ich.get("cross_signal", "NO_CROSS")
+            bounce = m5_ich.get("kijun_bounce", False)
+
+            if signal_action == "BUY":
+                if pos_m5 == "ABOVE_BOTH":
+                    bonus_total += 8.0
+                    adjustments.append("BONUS_ICHIMOKU_M5_ABOVE: +8")
+                elif "BELOW" in pos_m5:
+                    # Règle A : IRD reversal BULLISH → prix sous T/K attendu (entrée reversal)
+                    if _ird_reversal_bullish:
+                        adjustments.append(
+                            "ICHIMOKU_OPPOSE_SKIP: IRD reversal BULLISH ≥65 → malus position annulé"
+                        )
+                    else:
+                        malus_total += 10.0
+                        adjustments.append("MALUS_ICHIMOKU_M5_OPPOSE: -10")
+
+                # Règle C : cross bonus conditionné à l'énergie disponible
+                if cross == "GOLDEN_CROSS":
+                    if _energy_ok:
+                        bonus_total += 5.0
+                        adjustments.append("BONUS_GOLDEN_CROSS: +5")
+                    else:
+                        adjustments.append(
+                            "GOLDEN_CROSS_SKIP: déficit énergie → croisement non soutenu ignoré"
+                        )
+
+                # Règle B : bounce bonus conditionné à non-épuisement
+                if bounce and pos_m5 in ("ABOVE_BOTH", "BETWEEN_ABOVE_T"):
+                    if not _exhausted:
+                        bonus_total += 10.0
+                        adjustments.append("BONUS_KIJUN_BOUNCE_BUY: +10")
+                    else:
+                        adjustments.append(
+                            "KIJUN_BOUNCE_SKIP: marché épuisé → rebond Kijun potentiellement piège"
+                        )
+
+            elif signal_action == "SELL":
+                if pos_m5 == "BELOW_BOTH":
+                    bonus_total += 8.0
+                    adjustments.append("BONUS_ICHIMOKU_M5_BELOW: +8")
+                elif "ABOVE" in pos_m5:
+                    # Règle A : IRD reversal BEARISH → prix au-dessus T/K attendu (top reversal)
+                    if _ird_reversal_bearish:
+                        adjustments.append(
+                            "ICHIMOKU_OPPOSE_SKIP: IRD reversal BEARISH ≥65 → malus position annulé"
+                        )
+                    else:
+                        malus_total += 10.0
+                        adjustments.append("MALUS_ICHIMOKU_M5_OPPOSE: -10")
+
+                # Règle C
+                if cross == "DEATH_CROSS":
+                    if _energy_ok:
+                        bonus_total += 5.0
+                        adjustments.append("BONUS_DEATH_CROSS: +5")
+                    else:
+                        adjustments.append(
+                            "DEATH_CROSS_SKIP: déficit énergie → croisement non soutenu ignoré"
+                        )
+
+                # Règle B
+                if bounce and pos_m5 in ("BELOW_BOTH", "BETWEEN_ABOVE_K"):
+                    if not _exhausted:
+                        bonus_total += 10.0
+                        adjustments.append("BONUS_KIJUN_BOUNCE_SELL: +10")
+                    else:
+                        adjustments.append(
+                            "KIJUN_BOUNCE_SKIP: marché épuisé → rebond Kijun potentiellement piège"
+                        )
+
+        # ── M1 confirmation (+5 si aligné) ──────────────────────────────────
+        if m1_ich:
+            pos_m1 = m1_ich.get("position", "")
+            if signal_action == "BUY" and pos_m1 == "ABOVE_BOTH":
+                bonus_total += 5.0
+                adjustments.append("BONUS_ICHIMOKU_M1_CONFIRM: +5")
+            elif signal_action == "SELL" and pos_m1 == "BELOW_BOTH":
+                bonus_total += 5.0
+                adjustments.append("BONUS_ICHIMOKU_M1_CONFIRM: +5")
+
+    # ══════════════════════════════════════════════════════
+    # 14. CALCUL SCORE FINAL
     # ══════════════════════════════════════════════════════
     score_final = score_brut + bonus_total - malus_total
     score_final = max(0.0, min(100.0, score_final))

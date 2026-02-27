@@ -1479,7 +1479,17 @@ class InstitutionalReversalDetector:
         )
 
     def _calculate_institutional_score(self, signals: List[ReversalSignal]) -> float:
-        """Calcule un score institutionnel pondéré"""
+        """
+        Calcule un score institutionnel pondéré.
+
+        27 FEV 2026 — Correction normalisation :
+        Ancienne formule : weighted_sum / 1.0 → score 7-19/100 même pour signaux forts
+        car les layers inactifs (strength=0) pesaient dans le dénominateur.
+
+        Nouvelle formule : normalisation par les poids × confidence des seuls layers
+        ACTIFS (strength > 0). Un signal fort sur 1 layer = score élevé sur ce layer.
+        Score = "à quel point les signaux qui ont détecté quelque chose sont-ils convaincants?"
+        """
         if not signals:
             return 0.0
 
@@ -1504,21 +1514,22 @@ class InstitutionalReversalDetector:
             elif "CAPITAL_FLOWS" in signal.name or "CVD" in signal.name:
                 weight_key = "capital_flows_weight"
             else:
-                # Bonus layers (confluence) - pas de poids fixe, boost les autres
+                # Bonus layers (confluence) - pas de poids fixe
                 continue
 
             if weight_key and weight_key in weights:
                 weight = weights[weight_key]
-                weighted_sum += signal.strength * weight * signal.confidence
-                total_weight += weight
+                if signal.strength > 0:
+                    # 27 FEV 2026: normaliser uniquement sur les signaux actifs
+                    # → les layers silencieux ne diluent plus le score
+                    weighted_sum += signal.strength * weight * signal.confidence
+                    total_weight += weight * signal.confidence
 
         if total_weight == 0:
             return 0.0
 
-        # Score normalise (0-100) — diviser par max(1.0, total_weight) pour eviter distorsion
-        # Note: CAPITAL_FLOWS est deja inclus dans weighted_sum via capital_flows_weight
-        # Le bonus_boost precedent double-comptait FLOWS → supprime
-        final_score = min(100.0, weighted_sum / max(1.0, total_weight))
+        # Normalisation sur les signaux actifs uniquement
+        final_score = min(100.0, weighted_sum / total_weight)
 
         return final_score
 

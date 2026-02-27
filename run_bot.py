@@ -27,6 +27,7 @@ from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
 from phase_observer.timing_analyzer import evaluate_trading_conditions
+from phase_observer.ichimoku_analyzer import IchimokuAnalyzer
 # 16 FEV 2026: SimpleAdvancedScorer supprime — scoring centralise dans advanced_scoring.calculate_final_score()
 
 
@@ -1718,6 +1719,14 @@ def scalping_worker(
         logger.error(f"❌ [{asset}] Impossible de créer InstitutionalReversalDetector: {e}")
         institutional_detector = None
 
+    # 27 FEV 2026: Ichimoku Light — garde-fou + scoring
+    try:
+        ichimoku_analyzer = IchimokuAnalyzer(logger=logger)
+        logger.info(f"✅ [{asset}] IchimokuAnalyzer instancié")
+    except Exception as e:
+        logger.error(f"❌ [{asset}] Impossible de créer IchimokuAnalyzer: {e}")
+        ichimoku_analyzer = None
+
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
@@ -2345,6 +2354,24 @@ def scalping_worker(
                 except Exception as e_inst:
                     logger.error(f"[INSTITUTIONAL][{asset}] Erreur: {e_inst}", exc_info=True)
 
+                # ════════════════════════════════════════════════════════════════
+                # 27 FEV 2026: ICHIMOKU LIGHT — Garde-fou + Scoring
+                # Doit être appelé AVANT le timing gatekeeper (lui fournit ichimoku_result)
+                # ════════════════════════════════════════════════════════════════
+                ichimoku_result = None
+                try:
+                    if ichimoku_analyzer is not None:
+                        ichimoku_result = ichimoku_analyzer.analyze(
+                            df_m5=rates_df_m5,
+                            df_m1=rates_df_fresh,
+                            current_price=current_price,
+                            point=point,
+                            asset=asset,
+                        )
+                except Exception as e_ich:
+                    logger.warning(f"[{asset}] Erreur IchimokuAnalyzer: {e_ich}")
+                    ichimoku_result = None
+
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
                 # 🔧 FIX (03 JAN 2026): Initialiser fusion_out pour éviter UnboundLocalError
@@ -2376,7 +2403,10 @@ def scalping_worker(
                         asset=asset,
                         current_time=pd.Timestamp.now(tz='UTC'),
                         ticks_df=ticks_for_timing,
-                        market_context={},
+                        market_context={
+                            "ichimoku_result": ichimoku_result,   # 27 FEV 2026
+                            "mtf_direction": mtf_direction,        # 27 FEV 2026
+                        },
                         asset_config=asset_config_timing,
                         scalping_config=scalping_config_global
                     )
@@ -2422,6 +2452,7 @@ def scalping_worker(
                     # 16 FEV 2026: Passer fatigue/physics pour scoring centralise
                     fatigue_result=fatigue_result,
                     physics_result=physics_result,
+                    ichimoku_result=ichimoku_result,   # 27 FEV 2026
                 )
 
                 # Extraire decision_mini depuis fusion_out pour compatibilité dashboard/rapport

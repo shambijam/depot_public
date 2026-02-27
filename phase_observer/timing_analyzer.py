@@ -292,6 +292,45 @@ def evaluate_trading_conditions(
                 f"({candle_age_s}s dans la bougie, max={max_candle_age_s}s)"
             )
 
+    # ════════════════════════════════════════════════════════════
+    # VETO ICHIMOKU_ZONE (27 FEV 2026) — Veto absolu
+    # Blocage si prix à < 5 pips d'un plus haut (MTF BULLISH)
+    # ou d'un plus bas (MTF BEARISH)
+    # Reçu via market_context["ichimoku_result"] + ["mtf_direction"]
+    # Note : veto_score = 100 → non overridable (override nécessite veto_score < 60)
+    # ════════════════════════════════════════════════════════════
+    ichimoku_ctx = market_context.get("ichimoku_result") if market_context else None
+    mtf_dir = market_context.get("mtf_direction", "NEUTRAL") if market_context else "NEUTRAL"
+
+    if ichimoku_ctx and ichimoku_ctx.get("available") and mtf_dir in ("BULLISH", "BEARISH"):
+        m5_ich = ichimoku_ctx.get("m5")
+        if m5_ich:
+            zone = m5_ich.get("zone", {})
+            zone_level = zone.get("level", 0)
+            zone_type = zone.get("type", "NONE")
+
+            if zone_level >= 2:
+                blocked = False
+                block_reason = ""
+
+                if "RESISTANCE" in zone_type and mtf_dir == "BULLISH":
+                    blocked = True
+                    block_reason = (
+                        f"ICHIMOKU_ZONE: {zone_type} à "
+                        f"{zone.get('distance_high_pips', 0):.1f} pips (MTF BULLISH)"
+                    )
+                elif "SUPPORT" in zone_type and mtf_dir == "BEARISH":
+                    blocked = True
+                    block_reason = (
+                        f"ICHIMOKU_ZONE: {zone_type} à "
+                        f"{zone.get('distance_low_pips', 0):.1f} pips (MTF BEARISH)"
+                    )
+
+                if blocked:
+                    veto_score = 100.0  # Absolu — non overridable
+                    veto_reasons.append(f"🚫 {block_reason}")
+                    logger.critical(f"[ICHIMOKU_ZONE_VETO][{asset}] {block_reason}")
+
     # Plafonnement à 100
     veto_score = min(100.0, veto_score)
 
