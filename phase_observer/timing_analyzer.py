@@ -331,6 +331,29 @@ def evaluate_trading_conditions(
                     veto_reasons.append(f"🚫 {block_reason}")
                     logger.critical(f"[ICHIMOKU_ZONE_VETO][{asset}] {block_reason}")
 
+        # ── Veto M1 (03 MAR 2026) — seuil 3 pips, score=80 (overridable si score≥85)
+        m1_ich = ichimoku_ctx.get("m1")
+        if m1_ich:
+            zone_m1 = m1_ich.get("zone", {})
+            zone_type_m1 = zone_m1.get("type", "NONE")
+            dist_high_m1 = zone_m1.get("distance_high_pips", 999.0)
+            dist_low_m1 = zone_m1.get("distance_low_pips", 999.0)
+
+            m1_blocked = False
+            m1_reason = ""
+
+            if mtf_dir == "BULLISH" and zone_type_m1 not in ("BREAKOUT", "NONE") and 0 <= dist_high_m1 < 3.0:
+                m1_blocked = True
+                m1_reason = f"ICHIMOKU_M1_ZONE: HIGH à {dist_high_m1:.1f} pips (MTF BULLISH)"
+            elif mtf_dir == "BEARISH" and zone_type_m1 not in ("BREAKDOWN", "NONE") and 0 <= dist_low_m1 < 3.0:
+                m1_blocked = True
+                m1_reason = f"ICHIMOKU_M1_ZONE: LOW à {dist_low_m1:.1f} pips (MTF BEARISH)"
+
+            if m1_blocked:
+                veto_score = max(veto_score, 80.0)  # Overridable si score≥85
+                veto_reasons.append(f"⚠️ {m1_reason}")
+                logger.warning(f"[ICHIMOKU_M1_ZONE_VETO][{asset}] {m1_reason}")
+
     # Plafonnement à 100
     veto_score = min(100.0, veto_score)
 

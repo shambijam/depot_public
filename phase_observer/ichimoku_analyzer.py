@@ -78,10 +78,12 @@ class IchimokuAnalyzer:
             try:
                 m1_result = self._analyze_tf(df_m1, current_price, point)
                 if m1_result:
+                    m1_result["zone"] = self._detect_critical_zone(df_m1, current_price, point)
                     self._log.info(
                         f"[ICHIMOKU][{asset}][M1] "
                         f"Tenkan={m1_result['tenkan']:.5f} Kijun={m1_result['kijun']:.5f} "
-                        f"Pos={m1_result['position']} Cross={m1_result['cross_signal']}"
+                        f"Pos={m1_result['position']} Cross={m1_result['cross_signal']} "
+                        f"Zone={m1_result['zone']['type']}(lvl{m1_result['zone']['level']})"
                     )
             except Exception as e:
                 self._log.debug(f"[ICHIMOKU][{asset}] Erreur M1: {e}")
