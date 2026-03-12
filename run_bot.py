@@ -28,6 +28,7 @@ from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
 from phase_observer.timing_analyzer import evaluate_trading_conditions
 from phase_observer.ichimoku_analyzer import IchimokuAnalyzer
+from phase_observer.fast_reversal_detector import FastReversalDetector  # 12 MAR 2026
 # 16 FEV 2026: SimpleAdvancedScorer supprime — scoring centralise dans advanced_scoring.calculate_final_score()
 
 
@@ -1727,6 +1728,14 @@ def scalping_worker(
         logger.error(f"❌ [{asset}] Impossible de créer IchimokuAnalyzer: {e}")
         ichimoku_analyzer = None
 
+    # 12 MAR 2026: Fast Reversal Detector — micro-retournement M1
+    try:
+        fast_reversal_detector = FastReversalDetector(logger_ref=logger)
+        logger.info(f"✅ [{asset}] FastReversalDetector instancié")
+    except Exception as e:
+        logger.error(f"❌ [{asset}] Impossible de créer FastReversalDetector: {e}")
+        fast_reversal_detector = None
+
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
@@ -2372,6 +2381,36 @@ def scalping_worker(
                     logger.warning(f"[{asset}] Erreur IchimokuAnalyzer: {e_ich}")
                     ichimoku_result = None
 
+                # ════════════════════════════════════════════════════════════════
+                # 12 MAR 2026: FAST REVERSAL DETECTOR — Micro-retournement M1
+                # Appelé APRÈS Ichimoku (utilise ichimoku_result) et APRÈS
+                # OrderFlow V6 (utilise delta depuis orderflow_result_mini summary)
+                # ════════════════════════════════════════════════════════════════
+                fast_reversal_result = None
+                try:
+                    if fast_reversal_detector is not None:
+                        _fr_delta = float(
+                            orderflow_result_mini.get('summary', {}).get('delta', 0.0)
+                        )
+                        fast_reversal_result = fast_reversal_detector.analyze(
+                            df_m1=rates_df_fresh,
+                            ichimoku_result=ichimoku_result,
+                            delta_value=_fr_delta,
+                            point=point,
+                            mtf_direction=mtf_direction,
+                        )
+                        if fast_reversal_result.get('reversal_detected'):
+                            logger.info(
+                                f"[FAST_REVERSAL][{asset}] ⚡ "
+                                f"{fast_reversal_result['signal_count']} signaux "
+                                f"{fast_reversal_result['direction']} "
+                                f"conf={fast_reversal_result['confidence']:.2f} | "
+                                f"{' | '.join(fast_reversal_result['signals'])}"
+                            )
+                except Exception as e_fr:
+                    logger.warning(f"[{asset}] Erreur FastReversalDetector: {e_fr}")
+                    fast_reversal_result = None
+
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
                 # 🔧 FIX (03 JAN 2026): Initialiser fusion_out pour éviter UnboundLocalError
@@ -2452,7 +2491,8 @@ def scalping_worker(
                     # 16 FEV 2026: Passer fatigue/physics pour scoring centralise
                     fatigue_result=fatigue_result,
                     physics_result=physics_result,
-                    ichimoku_result=ichimoku_result,   # 27 FEV 2026
+                    ichimoku_result=ichimoku_result,           # 27 FEV 2026
+                    fast_reversal_result=fast_reversal_result, # 12 MAR 2026
                 )
 
                 # Extraire decision_mini depuis fusion_out pour compatibilité dashboard/rapport

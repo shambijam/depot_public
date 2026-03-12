@@ -54,6 +54,7 @@ def calculate_final_score(
     delta_momentum_score: float = 0.0,
     logger_ref=None,
     ichimoku_result: dict = None,   # 27 FEV 2026
+    fast_reversal_result: dict = None,  # 12 MAR 2026
 ) -> dict:
     """
     Calcule le score final en centralisant TOUS les bonus/malus.
@@ -638,7 +639,61 @@ def calculate_final_score(
                 adjustments.append("BONUS_ICHIMOKU_M1_CONFIRM: +5")
 
     # ══════════════════════════════════════════════════════
-    # 14. CALCUL SCORE FINAL
+    # 14. FAST REVERSAL DETECTOR (12 MAR 2026)
+    # Micro-retournement M1 — complémentaire à l'IRD institutionnel
+    #
+    # RÈGLES DE COORDINATION MTF :
+    #   - Direction OPPOSÉE au signal → malus (risque entrée contre micro-tendance)
+    #     → 2 signaux : -12×mtf_malus_factor | 3-4 signaux : -20×mtf_malus_factor
+    #   - Direction IDENTIQUE au signal → bonus de confirmation +8
+    #   - mtf_malus_factor appliqué : pullback dans tendance MTF forte = normal
+    #
+    # SEUIL : reversal_detected (>= 2 signaux concordants) requis
+    # ══════════════════════════════════════════════════════
+    if (fast_reversal_result
+            and fast_reversal_result.get('available')
+            and fast_reversal_result.get('reversal_detected')
+            and signal_action in ('BUY', 'SELL')):
+
+        fr_direction = str(fast_reversal_result.get('direction', 'NEUTRAL')).upper()
+        fr_signal_count = int(fast_reversal_result.get('signal_count', 0))
+        fr_signals_list = fast_reversal_result.get('signals', [])
+        fr_detail = " | ".join(fr_signals_list[:2]) if fr_signals_list else ""
+
+        fr_opposed = (
+            (fr_direction == 'BEARISH' and signal_action == 'BUY') or
+            (fr_direction == 'BULLISH' and signal_action == 'SELL')
+        )
+        fr_aligned = (
+            (fr_direction == 'BULLISH' and signal_action == 'BUY') or
+            (fr_direction == 'BEARISH' and signal_action == 'SELL')
+        )
+
+        if fr_opposed:
+            # Malus proportionnel au nombre de signaux × mtf_malus_factor
+            # (MTF 3/3 fort réduit le malus : micro-pull dans tendance = normal)
+            if fr_signal_count >= 3:
+                raw_malus = 20.0 * mtf_malus_factor
+            else:
+                raw_malus = 12.0 * mtf_malus_factor
+            malus_total += raw_malus
+            adjustments.append(
+                f"MALUS_FAST_REVERSAL: -{raw_malus:.0f} "
+                f"({fr_direction} contre {signal_action}, {fr_signal_count} signaux"
+                f"{' [MTF reduit]' if mtf_strong_aligned else ''}) [{fr_detail}]"
+            )
+
+        elif fr_aligned:
+            # Bonus de confirmation : micro-tendance confirme le signal
+            bonus_total += 8.0
+            adjustments.append(
+                f"BONUS_FAST_REVERSAL: +8 "
+                f"(micro-tendance {fr_direction} confirme {signal_action}, "
+                f"{fr_signal_count} signaux) [{fr_detail}]"
+            )
+
+    # ══════════════════════════════════════════════════════
+    # 15. CALCUL SCORE FINAL
     # ══════════════════════════════════════════════════════
     score_final = score_brut + bonus_total - malus_total
     score_final = max(0.0, min(100.0, score_final))

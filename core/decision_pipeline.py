@@ -848,7 +848,8 @@ class DecisionPipeline:
         # 16 FEV 2026: Ajout fatigue/physics pour scoring centralise
         fatigue_result: dict = None,
         physics_result: dict = None,
-        ichimoku_result: dict = None,   # 27 FEV 2026
+        ichimoku_result: dict = None,       # 27 FEV 2026
+        fast_reversal_result: dict = None,  # 12 MAR 2026
     ) -> dict:
         """
         Centralise TOUTE la logique de décision scalping (3 branches).
@@ -1286,6 +1287,7 @@ class DecisionPipeline:
                 point=point,
                 logger_ref=_log,
                 ichimoku_result=ichimoku_result,
+                fast_reversal_result=fast_reversal_result,  # 12 MAR 2026
             )
 
             score_brut = scoring_result["score_brut"]
