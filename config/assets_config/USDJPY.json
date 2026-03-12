@@ -278,7 +278,7 @@
         "rt_poll_interval_ms": 100,
         "min_age_ms_for_any_close": 2000,
         "enable_loss_guard": true,
-        "max_loss_pips": 5.0,
+        "max_loss_pips": 4.0,
         "loss_guard_arming_ms": 3000,
         "comment": "06 JAN 2026: Sniper scalping <10s → Profit 1.8p, Loss 15p = ratio 1:8.3"
       },
