@@ -259,7 +259,7 @@ class InstitutionalReversalDetector:
         """
         candles_m5 = market_data.get('candles_m5', pd.DataFrame())
 
-        if len(candles_m5) < 50:
+        if len(candles_m5) < 10:
             return self._empty_signal("CHANGEPOINT")
 
         prices = candles_m5['close'].values[-100:] if len(candles_m5) >= 100 else candles_m5['close'].values
@@ -268,7 +268,7 @@ class InstitutionalReversalDetector:
         returns = np.diff(np.log(prices))
 
         # 2. Changement de variance (volatilité)
-        window_size = 20
+        window_size = min(20, max(3, len(returns) // 3))
         if len(returns) < window_size + 5:
             return self._empty_signal("CHANGEPOINT")
 
@@ -328,7 +328,7 @@ class InstitutionalReversalDetector:
 
     def _chow_test_numpy(self, prices: np.ndarray) -> float:
         """Test de Chow SANS scipy - Version numpy pure"""
-        if len(prices) < 30:
+        if len(prices) < 10:
             return 1.0
 
         mid = len(prices) // 2
@@ -405,7 +405,7 @@ class InstitutionalReversalDetector:
                                    cvd_values: List[float],
                                    timeframe: str) -> ReversalSignal:
         """Détection avancée de divergence (régulière + cachée)"""
-        if len(candles) < 30 or len(cvd_values) < 30:
+        if len(candles) < 10 or len(cvd_values) < 10:
             return self._empty_signal(f"DIVERGENCE_{timeframe}")
 
         price_highs = candles['high'].values[-10:]
@@ -480,7 +480,7 @@ class InstitutionalReversalDetector:
         delta_values = market_data.get('delta_values', [])
         volume_values = market_data.get('volume_values', [])
 
-        if len(delta_values) < 50 or len(volume_values) < 50:
+        if len(delta_values) < 15 or len(volume_values) < 15:
             return self._empty_signal("FATIGUE")
 
         # 1. Décroissance exponentielle du momentum
@@ -527,14 +527,15 @@ class InstitutionalReversalDetector:
 
     def _calculate_momentum_decay_impl(self, delta_values: List[float]) -> float:
         """Calcul décroissance momentum"""
-        if len(delta_values) < 20:
+        if len(delta_values) < 6:
             return 0.0
 
-        deltas = np.array(delta_values[-20:])
+        window = min(len(delta_values), 6)
+        deltas = np.array(delta_values[-window:])
 
         # Momentum = moyenne mobile exponentielle
-        ema_short = np.mean(deltas[-5:])
-        ema_long = np.mean(deltas[-20:])
+        ema_short = np.mean(deltas[-3:])
+        ema_long = np.mean(deltas[-window:])
 
         if abs(ema_long) < 1:
             return 0.0
@@ -568,14 +569,14 @@ class InstitutionalReversalDetector:
 
     def _detect_large_delta_exhaustion(self, delta_values: List[float]) -> bool:
         """Gros deltas disparaissent (fatigue)"""
-        if len(delta_values) < 30:
+        if len(delta_values) < 10:
             return False
 
-        deltas = np.array(delta_values[-30:])
+        deltas = np.array(delta_values[-10:])
 
         # Comparer 1ère moitié vs 2ème moitié
-        first_half = deltas[:15]
-        second_half = deltas[15:]
+        first_half = deltas[:5]
+        second_half = deltas[5:]
 
         # Compter deltas >30 (gros)
         large_first = np.sum(np.abs(first_half) > 30)
@@ -591,11 +592,11 @@ class InstitutionalReversalDetector:
         """Fatigue temporelle (durée tendance)"""
         candles_m5 = market_data.get('candles_m5', pd.DataFrame())
 
-        if len(candles_m5) < 20:
+        if len(candles_m5) < 5:
             return 0.0
 
         # Compter bougies consécutives dans même direction
-        candles_list = candles_m5.tail(20).to_dict('records')
+        candles_list = candles_m5.tail(5).to_dict('records')
 
         consecutive_green = 0
         consecutive_red = 0
@@ -651,7 +652,7 @@ class InstitutionalReversalDetector:
         candles = market_data.get('candles_m5', pd.DataFrame())
         volume = market_data.get('volume_values', [])
 
-        if len(candles) < 20 or len(volume) < 20:
+        if len(candles) < 5 or len(volume) < 5:
             return self._empty_signal("SMART_MONEY")
 
         # 1. Phase Wyckoff
@@ -994,10 +995,10 @@ class InstitutionalReversalDetector:
         """Statistical outliers (Z-score)"""
         candles_m5 = market_data.get('candles_m5', pd.DataFrame())
 
-        if len(candles_m5) < 20:
+        if len(candles_m5) < 5:
             return {"detected": [], "strength": 0.0}
 
-        prices = candles_m5['close'].values[-20:]
+        prices = candles_m5['close'].values[-min(len(candles_m5), 20):]
         patterns_detected = []
         z_score = 0.0
 
@@ -1096,7 +1097,7 @@ class InstitutionalReversalDetector:
         """Analyse la confluence des niveaux institutionnels"""
         candles_m5 = market_data.get('candles_m5', pd.DataFrame())
 
-        if len(candles_m5) < 50:
+        if len(candles_m5) < 10:
             return self._empty_signal("CONFLUENCE")
 
         # 1. Fibonacci confluence
@@ -1537,7 +1538,7 @@ class InstitutionalReversalDetector:
         """Détecte un changement de régime de marché"""
         candles_m5 = market_data.get('candles_m5', pd.DataFrame())
 
-        if len(candles_m5) < 50:
+        if len(candles_m5) < 10:
             return {"detected": False, "new_regime": self.market_regime}
 
         prices = candles_m5['close'].values[-100:] if len(candles_m5) >= 100 else candles_m5['close'].values
