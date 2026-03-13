@@ -673,9 +673,9 @@ def calculate_final_score(
             # Malus proportionnel au nombre de signaux × mtf_malus_factor
             # (MTF 3/3 fort réduit le malus : micro-pull dans tendance = normal)
             if fr_signal_count >= 3:
-                raw_malus = 20.0 * mtf_malus_factor
+                raw_malus = 35.0 * mtf_malus_factor
             else:
-                raw_malus = 12.0 * mtf_malus_factor
+                raw_malus = 20.0 * mtf_malus_factor
             malus_total += raw_malus
             adjustments.append(
                 f"MALUS_FAST_REVERSAL: -{raw_malus:.0f} "
